@@ -1,0 +1,15 @@
+#!/bin/sh
+# Local protection for repos with no server-side enforcement. `pipeline init`
+# copies this into .git/hooks rather than tracking a hooks path, so a checked-out
+# branch can never supply its own hook.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main | refs/heads/master)
+      if [ -z "$PIPELINE_ADMIN_PUSH" ]; then
+        echo "Blocked: direct push to $remote_ref. Open a PR instead." >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+exit 0

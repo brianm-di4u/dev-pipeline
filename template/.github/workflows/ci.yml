@@ -1,0 +1,31 @@
+# Runs the PR's code with a read-only token and no secrets. A PR can edit this
+# file, so the gate treats any change under .github/ as T2 and reads this job's
+# result itself. See gate.yml.
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    # Private repos skip CI, so it costs no minutes and starts working if the repo goes public.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # PIPELINE:CI-SETUP
+      - run: node .pipeline/verify.mjs full

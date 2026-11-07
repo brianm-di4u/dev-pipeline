@@ -1,0 +1,39 @@
+name: Decision request
+description: A design, determination, legal, security, or major call that needs the admin.
+title: "Decision: "
+labels: [decision-needed]
+body:
+  - type: dropdown
+    id: class
+    attributes:
+      label: Class
+      options: [design, determination, legal, security, major]
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: >-
+        What's being decided and why it can't be decided without the admin. Put
+        exploitable security detail in a draft security advisory, and only link to it here.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options
+      description: Named options, each with its trade-offs. Put your recommendation first.
+      value: |
+        - **A (recommended):**
+        - **B:**
+    validations:
+      required: true
+  - type: textarea
+    id: parked
+    attributes:
+      label: What's waiting on this
+      description: The PRs or issues parked until this is answered.
+  - type: markdown
+    attributes:
+      value: "The admin answers with a comment containing only `/decide <option>`."

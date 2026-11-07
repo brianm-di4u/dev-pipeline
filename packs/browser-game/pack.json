@@ -1,0 +1,19 @@
+{
+  "name": "browser-game",
+  "description": "Browser apps and games: a self-contained page, tested in real browsers with screenshots.",
+  "verify": {
+    "fast": "node --test tests-node/",
+    "full": ["node --test tests-node/", "node shared/test-harness/run.mjs . --milestone ci"],
+    "e2e": "node shared/test-harness/run.mjs . --milestone e2e --slow"
+  },
+  "t2Paths": ["shared/test-harness/**", "shared/tools/**"],
+  "gitignore": ["/screenshots/", "shared/test-harness/.tmp/"],
+  "ci": {
+    "setup": [
+      {
+        "name": "Install the test harness and browser",
+        "run": "cd shared/test-harness && npm ci --ignore-scripts && npx playwright install --with-deps chromium"
+      }
+    ]
+  }
+}

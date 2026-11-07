@@ -1,0 +1,8 @@
+node_modules/
+.pipeline/evidence/
+.pipeline/runs/
+.claude/settings.local.json
+.env
+.env.*
+docs/private/
+*.log

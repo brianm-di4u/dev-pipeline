@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{PROJECT}}</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #14213d;
+        color: #f8f9fa;
+        font: 16px system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage" aria-label="{{PROJECT}}"></canvas>
+    <script>
+      // A starting point that satisfies the window.__game test contract.
+      // Replace it with your project. See shared/test-harness/README.md.
+      const canvas = document.getElementById('stage');
+      const context = canvas.getContext('2d');
+      let state = { score: 0, scene: 'title' };
+
+      function draw() {
+        canvas.width = canvas.clientWidth;
+        canvas.height = canvas.clientHeight;
+        context.fillStyle = '#fca311';
+        context.beginPath();
+        context.arc(canvas.width / 2, canvas.height / 2, 60 + state.score, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = '#f8f9fa';
+        context.textAlign = 'center';
+        context.font = '24px system-ui, sans-serif';
+        context.fillText(`Score: ${state.score}`, canvas.width / 2, canvas.height / 2 + 120);
+      }
+
+      canvas.addEventListener('pointerup', () => {
+        state.score += 1;
+        draw();
+      });
+      addEventListener('resize', draw);
+
+      window.__game = {
+        seed() {},
+        getState: () => state,
+        setState(next) {
+          state = next;
+          draw();
+        },
+        isIdle: () => true,
+        scene(name) {
+          state.scene = name;
+          draw();
+        },
+        newGame() {
+          state = { score: 0, scene: 'game' };
+          draw();
+        },
+      };
+      draw();
+    </script>
+  </body>
+</html>

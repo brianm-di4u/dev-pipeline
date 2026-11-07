@@ -1,0 +1,7 @@
+# Third-party commentary transcript: copyrighted, kept local only.
+How Claude Fixes It's Own Code.txt
+/reference/
+node_modules/
+.pipeline/evidence/
+.claude/settings.local.json
+*.log

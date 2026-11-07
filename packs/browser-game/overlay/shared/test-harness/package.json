@@ -1,0 +1,14 @@
+{
+  "name": "hot-springs-test-harness",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright screenshot test runner for the Hot Springs games",
+  "license": "MIT",
+  "scripts": {
+    "smoke": "node run.mjs smoke"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

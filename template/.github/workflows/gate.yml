@@ -1,0 +1,47 @@
+# The merge gate. These triggers always run this file from the default branch, so
+# a PR can't rewrite it. It may fetch PR objects, but it must never check out or
+# execute PR content, and it must treat all PR text as data. Never interpolate
+# event text into a run: block.
+#
+# Branch protection requires the pipeline/gate check, pinned to the GitHub Actions
+# app. It is published by gate.mjs, not by this job's own status.
+name: gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: ${{ !github.event.repository.private && (github.event_name != 'issue_comment' || github.event.issue.pull_request) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: node .pipeline/gate.mjs ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,10 @@
+{
+  "name": "generic",
+  "description": "Any stack. You fill in the verify commands in pipeline.config.json.",
+  "verify": {
+    "fast": "TODO: quick checks, such as lint and unit tests",
+    "full": "TODO: everything CI should run",
+    "e2e": "TODO: run the real app and exercise it"
+  },
+  "ci": { "setup": [] }
+}
