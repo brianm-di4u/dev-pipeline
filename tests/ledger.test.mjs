@@ -7,6 +7,7 @@ import {
   nextStep,
   recordRound,
   resolveFinding,
+  sameFinding,
   selectSeats,
 } from '../template/.pipeline/lib/ledger.mjs';
 
@@ -14,17 +15,21 @@ const council = { maxRounds: 3, maxRoundsSensitive: 5, maxNits: 5, maxSeats: 6, 
 const step = (ledger, overrides = {}) =>
   nextStep({ ledger, tier: 1, hash: 'h1', council, cleanTree: true, evidenceOk: true, diffLines: 100, ...overrides });
 
-const finding = (severity, overrides = {}) => ({
-  severity,
-  class: 'off-by-one',
-  file: 'src/a.js',
-  line: 1,
-  claim: `claim ${Math.random()}`,
-  evidence: 'e',
-  fix: 'f',
-  preExisting: false,
-  ...overrides,
-});
+let serial = 0;
+const finding = (severity, overrides = {}) => {
+  serial += 1;
+  return {
+    severity,
+    class: 'off-by-one',
+    file: `src/file${serial}.js`,
+    line: 1,
+    claim: `claim ${serial}`,
+    evidence: 'e',
+    fix: 'f',
+    preExisting: false,
+    ...overrides,
+  };
+};
 
 function round(ledger, hash, findings = [], extra = {}) {
   const planned = step(ledger, { hash });
@@ -119,6 +124,29 @@ test('a repeated finding is dropped, even after being declined', () => {
   });
   assert.equal(outcome.repeats.length, 1);
   assert.equal(ledger.findings.length, 1);
+});
+
+test('a reworded repeat on a shifted line is still a repeat', () => {
+  const first = {
+    file: 'src/users.js',
+    line: 2,
+    class: 'sql-injection (string-concatenated query)',
+    claim: 'The name is concatenated into the SQL string.',
+  };
+  const second = {
+    file: 'src/users.js',
+    line: 4,
+    class: 'SQL injection (untrusted input)',
+    claim: 'User input reaches the query unescaped.',
+  };
+  assert.equal(sameFinding(first, second), true);
+  assert.equal(sameFinding(first, { ...second, file: 'src/other.js' }), false, 'another file');
+  assert.equal(sameFinding(first, { ...second, line: 40 }), false, 'far away');
+  assert.equal(
+    sameFinding(first, { ...second, class: 'race condition', claim: 'Two writers can interleave here.' }),
+    false,
+    'a different subject in the same place',
+  );
 });
 
 test('after a fix, the next round is diff-only', () => {

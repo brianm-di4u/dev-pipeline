@@ -14,11 +14,12 @@ const cli = join(root, 'bin', 'pipeline.mjs');
 const wanted = process.argv.slice(2);
 const packs = readdirSync(join(root, 'packs')).filter((p) => (wanted.length ? wanted.includes(p) : p !== 'generic'));
 
+const browser = `npx playwright install ${process.env.CI ? '--with-deps ' : ''}chromium`;
 const SETUP = {
-  'browser-game': 'cd shared/test-harness && npm ci --ignore-scripts && npx playwright install chromium',
-  'web-wasm-rust': 'cd shared/test-harness && npm ci --ignore-scripts && npx playwright install chromium',
-  'desktop-mobile': 'cd shared/test-harness && npm ci --ignore-scripts && npx playwright install chromium',
-  'node-ts': 'npm ci --ignore-scripts && npx playwright install chromium',
+  'browser-game': `cd shared/test-harness && npm ci --ignore-scripts && ${browser}`,
+  'web-wasm-rust': `cd shared/test-harness && npm ci --ignore-scripts && ${browser}`,
+  'desktop-mobile': `cd shared/test-harness && npm ci --ignore-scripts && ${browser}`,
+  'node-ts': `npm ci --ignore-scripts && ${browser}`,
 };
 
 const env = {

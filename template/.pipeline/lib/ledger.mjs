@@ -76,7 +76,22 @@ export function emptyLedger() {
   return { rounds: [], findings: [], nextId: 1, steppedBack: false, confirmUsed: false, growthAccepted: null, raise: null };
 }
 
-const findingKey = (f) => `${f.file ?? ''}|${f.class ?? ''}|${(f.claim ?? '').toLowerCase().slice(0, 80)}`;
+const STOPWORDS = new Set(['this', 'that', 'with', 'from', 'when', 'which', 'bug', 'class', 'missing', 'error', 'issue', 'problem']);
+const words = (text) =>
+  new Set((text ?? '').toLowerCase().match(/[a-z0-9]{4,}/g)?.filter((word) => !STOPWORDS.has(word)) ?? []);
+const overlap = (a, b) => [...a].filter((word) => b.has(word)).length;
+
+// Seats reword a finding from round to round, and fixes shift its line, so a repeat
+// is the same file, a nearby line, and the same subject.
+export function sameFinding(a, b) {
+  if ((a.file ?? '') !== (b.file ?? '')) return false;
+  if (Math.abs((a.line ?? 0) - (b.line ?? 0)) > 5) return false;
+  if (overlap(words(a.class), words(b.class)) > 0) return true;
+  const claimA = words(a.claim);
+  const claimB = words(b.claim);
+  const shared = overlap(claimA, claimB);
+  return shared > 0 && shared / new Set([...claimA, ...claimB]).size >= 0.25;
+}
 
 const unanswered = (ledger) => ledger.findings.filter((f) => f.status === 'open');
 const blockingOpen = (ledger) => unanswered(ledger).filter((f) => BLOCKING.has(f.severity));
@@ -145,7 +160,7 @@ export function nextStep({ ledger, tier, hash, council, cleanTree, evidenceOk, d
 }
 
 export function recordRound(ledger, { mode, round, hash, sha, diffLines, result }) {
-  const seen = new Set(ledger.findings.map(findingKey));
+  const seen = [...ledger.findings];
   const added = [];
   const repeats = [];
   let nits = ledger.findings.filter((f) => f.severity === 'nit').length;
@@ -156,12 +171,11 @@ export function recordRound(ledger, { mode, round, hash, sha, diffLines, result 
     (a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity),
   );
   for (const finding of ordered) {
-    const key = findingKey(finding);
-    if (seen.has(key)) {
+    if (seen.some((earlier) => sameFinding(earlier, finding))) {
       repeats.push(finding);
       continue;
     }
-    seen.add(key);
+    seen.push(finding);
     if (finding.preExisting) {
       ledger.findings.push({ ...finding, id: `P${ledger.nextId++}`, status: 'pre-existing', round });
       continue;

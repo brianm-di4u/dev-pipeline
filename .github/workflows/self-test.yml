@@ -35,3 +35,34 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color \
             .github/workflows/*.yml template/.github/workflows/*.yml packs/*/overlay/.github/workflows/*.yml
+
+  # Scaffolds each pack and runs its real verification on the platforms it targets.
+  packs:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pack: browser-game, os: ubuntu-latest }
+          - { pack: node-ts, os: ubuntu-latest }
+          - { pack: web-wasm-rust, os: ubuntu-latest, rust: true, targets: wasm32-unknown-unknown, tools: 'trunk,cargo-nextest,cargo-deny' }
+          - { pack: desktop-mobile, os: windows-latest, rust: true, targets: '', tools: 'cargo-deny,tauri-cli' }
+          - { pack: desktop-mobile, os: macos-latest, rust: true, targets: '', tools: 'cargo-deny,tauri-cli' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        if: ${{ matrix.rust }}
+        with:
+          targets: ${{ matrix.targets }}
+          components: clippy, rustfmt
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+        if: ${{ matrix.rust }}
+        with:
+          tool: ${{ matrix.tools }}
+      - run: node tests/e2e/packs.mjs ${{ matrix.pack }}

@@ -6,7 +6,7 @@
 //
 // Run a full cycle with the reviewer-eval skill. Rerun whenever seat prompts, tools,
 // or models change, and compare against the last baseline.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -57,6 +57,13 @@ export function buildCaseRepo(root, kase, reviewRules) {
   return { dir: dir.replaceAll('\\', '/'), mergeBase, head: git(dir, 'rev-parse', 'HEAD') };
 }
 
+// Real evidence, so the evidence seat judges what a real author would have shown it.
+function runCaseTests(dir) {
+  if (!existsSync(join(dir, 'tests'))) return 'This change has no tests, and no verification was run.\n';
+  const run = spawnSync('node', ['--test', 'tests/*.test.js'], { cwd: dir, encoding: 'utf8' });
+  return `$ node --test tests/*.test.js\n${run.stdout}${run.stderr}\nexit code: ${run.status}\n`;
+}
+
 async function prepare(args) {
   const out = resolve(args[0]);
   const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : null);
@@ -75,7 +82,7 @@ async function prepare(args) {
     const paths = Object.keys(kase.head);
     const evidenceDir = join(repo.dir, '.evidence').replaceAll('\\', '/');
     mkdirSync(evidenceDir, { recursive: true });
-    writeFileSync(join(evidenceDir, 'full.log'), 'No evidence was recorded for this change.\n');
+    writeFileSync(join(evidenceDir, 'full.log'), runCaseTests(repo.dir));
     const key = repo.dir.split('/').pop();
     index[key] = kase.id;
     plans.push({
