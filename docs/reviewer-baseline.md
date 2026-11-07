@@ -43,6 +43,6 @@ Good eval scores don't prove the pipeline around them works.
 
 ## Cost
 
-A T1 round, with 5 seats and 2 voters, used about 430,000 subagent tokens, or 60,000 per agent, and took under a minute. Most of that is each agent's starting context rather than review work. All 28 cases together used about 11.3 million tokens on the subscription. Weekly usage on the Ultra plan was 4% before the first evals and 5% after two full runs' worth of them.
+A T1 round, with 5 seats and 2 voters, used about 430,000 subagent tokens, or 60,000 per agent, and took under a minute. Most of that is each agent's starting context rather than review work. All 28 cases together used about 11.3 million tokens on the subscription. Across the whole build, including two full eval runs and the sandbox reviews, weekly usage on the Ultra plan went from 4% to 7%.
 
 To spend less per PR, lower `council.maxSeats` in `pipeline.config.json`.
