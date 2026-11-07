@@ -3,7 +3,7 @@
 // owner's own credentials, which is why agents aren't allowed to run it.
 //
 //   pipeline init <dir> --pack <name> [--repo owner/name] [--private] [--no-github]
-//   pipeline protect [--repo owner/name]
+//   pipeline protect [--repo owner/name] [--off]
 //   pipeline doctor [--repo owner/name]
 //   pipeline update [--check]
 //   pipeline packs
@@ -265,6 +265,14 @@ export const protectionBody = {
 async function protect({ flags }) {
   const repo = flags.repo ?? currentRepo();
   const info = JSON.parse(run('gh', ['api', `repos/${repo}`]));
+
+  // Break glass, for when a broken gate can't approve its own fix. Owner only.
+  if (flags.off) {
+    const off = ghApi(['-X', 'DELETE', `repos/${repo}/branches/${info.default_branch}/protection`]);
+    console.log(off.ok ? 'Protection is OFF. Push the fix, then run: pipeline protect' : off.stderr.trim());
+    return off.ok ? 0 : 1;
+  }
+
   const steps = [
     [
       'Merge settings',

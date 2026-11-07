@@ -32,8 +32,9 @@ jobs:
     permissions:
       contents: read
       checks: write
-      pull-requests: read
-      issues: write
+      # Write is only for the approval notice. Nothing here can merge or push.
+      pull-requests: write
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

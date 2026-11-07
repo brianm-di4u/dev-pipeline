@@ -219,8 +219,15 @@ async function runCi() {
       const input = await gather({ client, repo, number, cwd: process.cwd() });
       const result = evaluateGate(input);
       await publish(client, repo, input, result);
-      if (eventName === 'issue_comment') await echoApproval(client, repo, input, event);
       report(number, result);
+      if (eventName === 'issue_comment') {
+        // A failed notification must not change the merge decision, which is
+        // already published. It fails the job instead, so it stays visible.
+        await echoApproval(client, repo, input, event).catch((error) => {
+          failed = true;
+          console.error(`Could not post the approval notice: ${error.message}`);
+        });
+      }
     } catch (error) {
       // Fail closed: an error must never read as a pass.
       failed = true;
