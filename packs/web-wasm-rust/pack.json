@@ -1,0 +1,35 @@
+{
+  "name": "web-wasm-rust",
+  "extends": "browser-game",
+  "description": "Code-only HTML apps with JavaScript, WASM, and Rust, built with trunk and tested in real browsers.",
+  "verify": {
+    "fast": ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings", "cargo nextest run"],
+    "full": [
+      "cargo fmt --check",
+      "cargo clippy --all-targets -- -D warnings",
+      "cargo nextest run",
+      "cargo deny check licenses bans sources",
+      "trunk build --release --public-url ./",
+      "node --test \"tests-node/*.test.mjs\"",
+      "node shared/test-harness/run.mjs . --milestone ci"
+    ],
+    "e2e": ["trunk build --release --public-url ./", "node shared/test-harness/run.mjs . --milestone e2e --slow"]
+  },
+  "t2Paths": ["deny.toml", "Trunk.toml", "rust-toolchain.toml"],
+  "gitignore": ["/target/", "/dist/"],
+  "formatters": { ".rs": "rustfmt --edition 2024" },
+  "ci": {
+    "setup": [
+      {
+        "name": "Install Rust",
+        "uses": "dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec",
+        "with": { "targets": "wasm32-unknown-unknown", "components": "clippy, rustfmt" }
+      },
+      {
+        "name": "Install Rust tools",
+        "uses": "taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2",
+        "with": { "tool": "trunk,cargo-nextest,cargo-deny" }
+      }
+    ]
+  }
+}

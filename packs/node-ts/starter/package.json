@@ -1,0 +1,23 @@
+{
+  "name": "{{SLUG}}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/server.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node .pipeline/verify.mjs full",
+    "test:unit": "node --test \"src/**/*.test.ts\"",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "^24.0.0",
+    "eslint": "^10.0.0",
+    "prettier": "3.9.10",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "8.72.1"
+  }
+}

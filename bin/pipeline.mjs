@@ -91,11 +91,44 @@ export function listPacks() {
   return readdirSync(PACKS).filter((name) => existsSync(join(PACKS, name, 'pack.json')));
 }
 
+// A pack can extend another, which is how the WASM pack reuses the browser harness.
 export function loadPack(name) {
   const path = join(PACKS, name, 'pack.json');
   if (!existsSync(path)) throw new Error(`Unknown pack "${name}". Available: ${listPacks().join(', ')}`);
-  return JSON.parse(readFileSync(path, 'utf8'));
+  const pack = JSON.parse(readFileSync(path, 'utf8'));
+  const own = { ...pack, chain: [name] };
+  if (!pack.extends) return own;
+  const parent = loadPack(pack.extends);
+  return {
+    ...parent,
+    ...own,
+    chain: [...parent.chain, name],
+    verify: { ...parent.verify, ...pack.verify },
+    t2Paths: [...(parent.t2Paths ?? []), ...(pack.t2Paths ?? [])],
+    gitignore: [...(parent.gitignore ?? []), ...(pack.gitignore ?? [])],
+    formatters: { ...parent.formatters, ...pack.formatters },
+    ci: { setup: [...(parent.ci?.setup ?? []), ...(pack.ci?.setup ?? [])] },
+  };
 }
+
+const packDirs = (pack, kind) =>
+  pack.chain.map((name) => join(PACKS, name, kind)).filter((dir) => existsSync(dir));
+
+const slugify = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'app';
+
+const replaceTokens = (text, { admin, project, pack }) =>
+  text
+    .replaceAll('{{ADMIN}}', admin)
+    .replaceAll('{{PROJECT}}', project)
+    .replaceAll('{{SLUG}}', slugify(project))
+    .replaceAll('{{PACK}}', pack);
+
+const CI_SETUP_WORKFLOWS = ['ci.yml', 'post-merge.yml', 'release.yml'];
+
+const applyCiSetup = (text, pack) => {
+  const setup = renderCiSetup(pack);
+  return text.replace(/^[ \t]*# PIPELINE:CI-SETUP\r?\n/m, setup ? `${setup}\n` : '');
+};
 
 export function renderCiSetup(pack, indent = '      ') {
   const steps = pack.ci?.setup ?? [];
@@ -124,6 +157,7 @@ export function mergeConfig(config, pack) {
       t2Paths: [...config.tiers.t2Paths, ...(pack.t2Paths ?? [])],
     },
     formatters: { ...config.formatters, ...pack.formatters },
+    ...(pack.licenseExceptions ? { licenseExceptions: pack.licenseExceptions } : {}),
     ...(pack.council ? { council: { ...config.council, ...pack.council } } : {}),
   };
 }
@@ -136,18 +170,19 @@ export function scaffold(target, { pack: packName, admin, project }) {
   }
   mkdirSync(target, { recursive: true });
   cpSync(TEMPLATE, target, { recursive: true });
-  const overlay = join(PACKS, packName, 'overlay');
-  if (existsSync(overlay)) cpSync(overlay, target, { recursive: true, force: true });
+  // `overlay` is managed by `pipeline update`. `starter` is a one-time starting
+  // point, which belongs to the project as soon as it's copied.
+  for (const kind of ['overlay', 'starter']) {
+    for (const dir of packDirs(pack, kind)) cpSync(dir, target, { recursive: true, force: true });
+  }
 
-  const tokens = { '{{ADMIN}}': admin, '{{PROJECT}}': project, '{{PACK}}': packName };
   for (const file of walk(target)) {
     if (file.startsWith('.git/')) continue;
     const path = join(target, file);
     const text = readFileSync(path);
     if (text.includes(0)) continue;
-    let content = text.toString('utf8');
-    const before = content;
-    for (const [token, value] of Object.entries(tokens)) content = content.replaceAll(token, value);
+    const before = text.toString('utf8');
+    const content = replaceTokens(before, { admin, project, pack: packName });
     if (content !== before) writeFileSync(path, content);
   }
 
@@ -155,15 +190,9 @@ export function scaffold(target, { pack: packName, admin, project }) {
   const config = mergeConfig(JSON.parse(readFileSync(configPath, 'utf8')), pack);
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
-  for (const workflow of ['ci.yml', 'post-merge.yml']) {
+  for (const workflow of CI_SETUP_WORKFLOWS) {
     const path = join(target, '.github', 'workflows', workflow);
-    if (existsSync(path)) {
-      const setup = renderCiSetup(pack);
-      writeFileSync(
-        path,
-        readFileSync(path, 'utf8').replace(/^[ \t]*# PIPELINE:CI-SETUP\r?\n/m, setup ? `${setup}\n` : ''),
-      );
-    }
+    if (existsSync(path)) writeFileSync(path, applyCiSetup(readFileSync(path, 'utf8'), pack));
   }
 
   if (pack.gitignore?.length) {
@@ -175,12 +204,22 @@ export function scaffold(target, { pack: packName, admin, project }) {
   return { pack, config };
 }
 
+function managedSources(pack) {
+  const sources = new Map();
+  for (const base of [TEMPLATE, ...packDirs(pack, 'overlay')]) {
+    for (const file of walk(base)) {
+      if (!isProjectOwned(file)) sources.set(file, join(base, file));
+    }
+  }
+  return sources;
+}
+
 export function writeLock(target, packName) {
   const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
   const files = {};
-  for (const file of walk(target)) {
-    if (file.startsWith('.git/') || file === 'pipeline.lock.json') continue;
-    if (!isProjectOwned(file)) files[file] = sha256(readFileSync(join(target, file)));
+  for (const file of managedSources(loadPack(packName)).keys()) {
+    const path = join(target, file);
+    if (existsSync(path)) files[file] = sha256(readFileSync(path));
   }
   writeFileSync(
     join(target, 'pipeline.lock.json'),
@@ -451,29 +490,15 @@ async function doctor({ flags }) {
 export function planUpdate(target) {
   const lock = JSON.parse(readFileSync(join(target, 'pipeline.lock.json'), 'utf8'));
   const pack = loadPack(lock.pack);
-  const incoming = new Map();
-  const add = (base) => {
-    if (!existsSync(base)) return;
-    for (const file of walk(base)) incoming.set(file, join(base, file));
-  };
-  add(TEMPLATE);
-  add(join(PACKS, lock.pack, 'overlay'));
+  const config = JSON.parse(readFileSync(join(target, 'pipeline.config.json'), 'utf8'));
+  const tokens = { admin: config.admins[0], project: config.project, pack: lock.pack };
 
   const plan = { add: [], update: [], conflict: [], same: [] };
-  for (const [file, source] of incoming) {
-    if (isProjectOwned(file)) continue;
+  for (const [file, source] of managedSources(pack)) {
     let content = readFileSync(source);
     if (!content.includes(0)) {
-      const config = JSON.parse(readFileSync(join(target, 'pipeline.config.json'), 'utf8'));
-      let text = content
-        .toString('utf8')
-        .replaceAll('{{ADMIN}}', config.admins[0])
-        .replaceAll('{{PROJECT}}', config.project)
-        .replaceAll('{{PACK}}', lock.pack);
-      if (file === '.github/workflows/ci.yml' || file === '.github/workflows/post-merge.yml') {
-        const setup = renderCiSetup(pack);
-        text = text.replace(/^[ \t]*# PIPELINE:CI-SETUP\r?\n/m, setup ? `${setup}\n` : '');
-      }
+      let text = replaceTokens(content.toString('utf8'), tokens);
+      if (CI_SETUP_WORKFLOWS.some((name) => file === `.github/workflows/${name}`)) text = applyCiSetup(text, pack);
       content = Buffer.from(text);
     }
     const destination = join(target, file);

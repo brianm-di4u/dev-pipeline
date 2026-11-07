@@ -1,10 +1,10 @@
 {
-  "name": "{{PROJECT}}",
+  "name": "{{SLUG}}",
   "private": true,
   "type": "module",
   "scripts": {
     "setup": "cd shared/test-harness && npm install && npx playwright install chromium",
-    "build": "node shared/tools/inline.mjs .",
+    "build": "trunk build --release --public-url ./",
     "test": "node .pipeline/verify.mjs full"
   }
 }

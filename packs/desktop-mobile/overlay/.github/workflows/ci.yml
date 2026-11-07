@@ -1,0 +1,45 @@
+# Runs the PR's code with a read-only token and no secrets. A PR can edit this
+# file, so the gate treats any change under .github/ as T2 and reads the result of
+# the `verify` job itself. See gate.yml.
+#
+# Desktop apps build on each platform they ship to. The `verify` job gathers the
+# results, because the gate needs one answer. Public repos get these runners free.
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: ${{ !github.event.repository.private }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # PIPELINE:CI-SETUP
+      - run: node .pipeline/verify.mjs full
+
+  verify:
+    needs: build
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: test "${{ needs.build.result }}" = "success"

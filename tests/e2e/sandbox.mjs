@@ -470,6 +470,263 @@ await scenario('E6', 'A dishonest revert with extra content gets no fast path', 
   return check.output.title;
 });
 
+// ---- Detection, decisions, and private mode ----
+
+const owner = repo.split('/')[0];
+const issues = (label, state = 'open') =>
+  api(`repos/${repo}/issues?state=${state}&labels=${encodeURIComponent(label)}&per_page=50`).filter((i) => !i.pull_request);
+
+async function waitFor(what, predicate, timeout = 240000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    await sleep(6000);
+  }
+  throw new Error(`Timed out waiting for ${what}`);
+}
+
+// Lands a T1 change, and returns its merge commit.
+async function landOrdinary(name, path, content) {
+  freshBranch(name);
+  write(path, content);
+  commitAndPush(`Add ${name}`);
+  const number = openPr(`Add ${name}`, `${CONTRACT}${verdict(hashNow(), 1)}`);
+  gh('pr', 'merge', String(number), '--auto', '--squash');
+  const merged = await waitMerged(number, 240000);
+  const check = gateCheck(headOf(number));
+  expect(merged, `${name} did not merge. Gate: ${check?.conclusion} ${check?.output?.title} ${check?.output?.summary}`);
+  return api(`repos/${repo}/pulls/${number}`).merge_commit_sha;
+}
+
+async function revertIt(sha, name) {
+  freshBranch(`undo-${name}`);
+  git('revert', '--no-edit', sha);
+  git('push', '-q', '-u', 'origin', 'HEAD');
+  const number = openPr(`Revert "${name}"`, `Undoing it.\n\nRevert-of: ${sha}\n`);
+  gh('pr', 'merge', String(number), '--auto', '--squash');
+  const merged = await waitMerged(number, 240000);
+  const check = gateCheck(headOf(number));
+  expect(merged, `revert did not merge. Gate: ${check?.conclusion} ${check?.output?.summary}`);
+}
+
+await scenario('S0', 'A template update lands as a T2 PR with an approval', async () => {
+  const cli = new URL('../../bin/pipeline.mjs', import.meta.url);
+  freshBranch('update');
+  const output = execFileSync('node', [cli.pathname.replace(/^\/([A-Za-z]:)/, '$1').replaceAll('%20', ' '), 'update', '--dir', dir], {
+    cwd: dir,
+    encoding: 'utf8',
+  });
+  expect(/updated/.test(output), output);
+  const conflicts = output.split('\n').filter((line) => line.includes('KEPT'));
+  commitAndPush('Update from the template');
+  const hash = hashNow();
+  const number = openPr('Update from the template', `${CONTRACT}${verdict(hash, 2)}`);
+  await settled(number, { want: ['action_required', 'failure'] });
+  comment(number, `/approve ${hash.slice(0, 12)}`);
+  gh('pr', 'merge', String(number), '--auto', '--squash');
+  const merged = await waitMerged(number, 240000);
+  const check = gateCheck(headOf(number));
+  expect(merged, `not merged. Gate: ${check?.conclusion} ${check?.output?.title} ${check?.output?.summary}`);
+  return `merged; ${conflicts.length} locally modified files kept`;
+});
+
+await scenario('D1', 'A decision request notifies the owner; /decide labels it; the ADR is T0 only when it cites it', async () => {
+  const issue = JSON.parse(
+    sh('gh', ['api', '-X', 'POST', `repos/${repo}/issues`, '--input', '-'], {
+      input: JSON.stringify({ title: 'Decision: which license?', body: 'Options:\n- **A (recommended):** MIT\n- **B:** Apache-2.0', labels: ['decision-needed'] }),
+    }),
+  );
+  await waitFor('the bot @mention', () =>
+    api(`repos/${repo}/issues/${issue.number}/comments`).find(
+      (c) => c.user.login === 'github-actions[bot]' && c.body.includes(`@${owner}`),
+    ),
+  );
+
+  comment(issue.number, 'Maybe /decide A, thinking about it.');
+  await sleep(15000);
+  expect(!api(`repos/${repo}/issues/${issue.number}`).labels.some((l) => l.name === 'decided'), 'a quoted /decide counted');
+
+  comment(issue.number, '/decide A');
+  await waitFor('the decided label', () => api(`repos/${repo}/issues/${issue.number}`).labels.some((l) => l.name === 'decided'));
+
+  // Without the citation, it's T2.
+  freshBranch('adr-uncited');
+  write('docs/decisions/0002-license.md', `# 0002: License\n\nMIT. ${serial}\n`);
+  commitAndPush('Record a decision with no citation');
+  const uncited = openPr('Record a decision with no citation', `${CONTRACT}${verdict(hashNow(), 2)}`);
+  const check = await settled(uncited, { want: ['action_required'] });
+  expect(/T2/.test(check?.output?.title ?? ''), `uncited ADR: ${check?.output?.title}`);
+  closePr(uncited);
+
+  // With the citation, it merges as T0.
+  freshBranch('adr-cited');
+  write('docs/decisions/0002-license.md', `# 0002: License\n\nMIT. ${serial}\n`);
+  commitAndPush('Record the license decision');
+  const cited = openPr('Record the license decision', `${CONTRACT}Decision: #${issue.number}\n${verdict(hashNow(), 0)}`);
+  gh('pr', 'merge', String(cited), '--auto', '--squash');
+  const merged = await waitMerged(cited, 240000);
+  const final = gateCheck(headOf(cited));
+  expect(merged, `cited ADR: ${final?.conclusion} ${final?.output?.title} ${final?.output?.summary}`);
+  expect(/T0/.test(final.output.title), final.output.title);
+  sh('gh', ['issue', 'close', String(issue.number)]);
+  return 'notified, decided, recorded';
+});
+
+await scenario('D2', 'A GPL dependency is blocked, and other work carries on', async () => {
+  freshBranch('gpl');
+  write(
+    'package-lock.json',
+    `${JSON.stringify({ name: 'pipeline-sandbox', lockfileVersion: 3, packages: { '': { name: 'pipeline-sandbox' }, 'node_modules/copyleft-thing': { version: '1.0.0', license: 'GPL-3.0-only' } } }, null, 2)}\n`,
+  );
+  commitAndPush('Add a dependency');
+  const blocked = openPr('Add a dependency', `${CONTRACT}${verdict(hashNow(), 1)}`);
+  const check = await settled(blocked, { want: ['failure'] });
+  expect(/verify concluded failure/.test(check?.output?.summary ?? ''), `gate: ${check?.conclusion} ${check?.output?.summary}`);
+  const runId = api(`repos/${repo}/actions/runs?event=pull_request&per_page=5`).workflow_runs.find((r) => r.head_sha === headOf(blocked))?.id;
+  const log = spawnSync('gh', ['run', 'view', String(runId), '--log-failed'], { cwd: dir, encoding: 'utf8', maxBuffer: 1 << 26 }).stdout;
+  expect(/needs a legal decision/.test(log), `the failure doesn't say why: ${log.slice(-300)}`);
+  expect(/copyleft-thing/.test(log), 'the failure does not name the package');
+
+  // Parking this PR doesn't stop other work.
+  freshBranch('docs-while-parked');
+  write('docs/other-work.md', `# Other work ${serial}\n`);
+  commitAndPush('Other work');
+  const other = openPr('Other work', `${CONTRACT}${verdict(hashNow(), 0)}`);
+  gh('pr', 'merge', String(other), '--auto', '--squash');
+  expect(await waitMerged(other, 240000), 'other work did not merge');
+  return 'blocked with the reason; other work merged';
+});
+
+await scenario('M1', 'A red main notifies the owner, blocks T1, and a clean revert restores it', async () => {
+  const sha = await landOrdinary(
+    'red-on-main',
+    'tests/red-on-main.test.mjs',
+    "import { test } from 'node:test';\ntest('fails only on main', () => { if (process.env.GITHUB_EVENT_NAME === 'push') throw new Error('red'); });\n",
+  );
+  const red = await waitFor('the main-red issue', () =>
+    issues('pipeline:main-red').find((i) => i.user.login === 'github-actions[bot]'),
+  );
+  expect(red.body.includes(`@${owner}`), 'the issue does not mention the owner');
+
+  freshBranch('blocked-by-red');
+  write('src/blocked.js', `export const blocked = ${serial};\n`);
+  commitAndPush('Blocked by red main');
+  const blocked = openPr('Blocked by red main', `${CONTRACT}${verdict(hashNow(), 1)}`);
+  const check = await settled(blocked, { want: ['failure'] });
+  expect(/Main is red/.test(check?.output?.summary ?? ''), `gate: ${check?.conclusion} ${check?.output?.summary}`);
+  expect(!tryMerge(blocked).ok, 'merged on a red main');
+  closePr(blocked);
+
+  await revertIt(sha, 'red-on-main');
+  await waitFor('the main-red issue to close', () => issues('pipeline:main-red').length === 0);
+  return 'notified, blocked, reverted, cleared';
+});
+
+await scenario('B1', 'Repeated failures trip the breaker, closing the issue is not enough, and /rearm clears it', async () => {
+  let cycles = 0;
+  while (issues('pipeline:breaker').length === 0 && cycles < 3) {
+    cycles += 1;
+    const sha = await landOrdinary(`cycle-${cycles}`, `src/cycle${serial}.js`, `export const c = ${serial};\n`);
+    await revertIt(sha, `cycle-${cycles}`);
+    await sleep(45000);
+  }
+  const breaker = await waitFor('the breaker issue', () =>
+    issues('pipeline:breaker').find((i) => i.user.login === 'github-actions[bot]'),
+  );
+  expect(breaker.body.includes(`@${owner}`), 'the issue does not mention the owner');
+
+  freshBranch('during-breaker');
+  write('src/during.js', `export const during = ${serial};\n`);
+  commitAndPush('During the breaker');
+  const hash = hashNow();
+  const held = openPr('During the breaker', `${CONTRACT}${verdict(hash, 1)}`);
+  let check = await settled(held, { want: ['action_required'] });
+  expect(check?.conclusion === 'action_required', `T1 while tripped: ${check?.conclusion} ${check?.output?.summary}`);
+  expect(/circuit breaker/i.test(check.output.summary), check.output.summary);
+
+  // An agent closing the issue doesn't re-arm anything.
+  sh('gh', ['api', '-X', 'PATCH', `repos/${repo}/issues/${breaker.number}`, '--input', '-'], { input: '{"state":"closed"}' });
+  setBody(held, `${CONTRACT}${verdict(hash, 1)}\n\nNudge.`);
+  await sleep(20000);
+  check = await settled(held, { want: ['action_required', 'success'] });
+  expect(check?.conclusion === 'action_required', `closing the issue re-armed it: ${check?.conclusion}`);
+
+  comment(breaker.number, '/rearm');
+  await sleep(20000);
+  setBody(held, `${CONTRACT}${verdict(hash, 1)}\n\nNudge again.`);
+  check = await settled(held, { want: ['success'] });
+  expect(check?.conclusion === 'success', `after /rearm: ${check?.conclusion} ${check?.output?.summary}`);
+  return `tripped after ${cycles} extra cycles; closing did nothing; /rearm cleared it`;
+});
+
+await scenario('U1', 'The audit notices weakened protection, and the digest is posted', async () => {
+  const dispatch = async () => {
+    const before = api(`repos/${repo}/actions/workflows/audit.yml/runs?per_page=1`).workflow_runs[0]?.id;
+    gh('workflow', 'run', 'audit.yml');
+    await waitFor('the audit run to finish', () => {
+      const run = api(`repos/${repo}/actions/workflows/audit.yml/runs?per_page=1`).workflow_runs[0];
+      return run && run.id !== before && run.status === 'completed' ? run : null;
+    });
+  };
+  await dispatch();
+  expect(issues('pipeline:audit').length === 0, 'the audit flagged healthy protection');
+  const digest = issues('pipeline:digest').find((i) => i.user.login === 'github-actions[bot]');
+  expect(digest, 'no digest was posted');
+  expect(digest.body.includes(`@${owner}`) && /Merged/.test(digest.body), digest.body.slice(0, 200));
+
+  sh('gh', ['api', '-X', 'PATCH', `repos/${repo}/branches/main/protection/required_status_checks`, '--input', '-'], {
+    input: JSON.stringify({ strict: true, checks: [{ context: 'pipeline/gate', app_id: -1 }] }),
+  });
+  await dispatch();
+  const flagged = issues('pipeline:audit').find((i) => i.user.login === 'github-actions[bot]');
+  sh('gh', ['api', '-X', 'PATCH', `repos/${repo}/branches/main/protection/required_status_checks`, '--input', '-'], {
+    input: JSON.stringify({ strict: true, checks: [{ context: 'pipeline/gate', app_id: 15368 }] }),
+  });
+  expect(flagged, 'the audit missed an unpinned check');
+  await dispatch();
+  expect(issues('pipeline:audit').length === 0, 'the audit issue did not close after the repair');
+  return 'healthy, flagged, repaired; digest posted';
+});
+
+await scenario('P1', 'Private mode: CI stays off, the local gate still blocks, and doctor says advisory', async () => {
+  const cli = new URL('../../bin/pipeline.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1').replaceAll('%20', ' ');
+  gh('repo', 'edit', repo, '--visibility', 'private', '--accept-visibility-change-consequences');
+  try {
+    const doctor = spawnSync('node', [cli, 'doctor', '--repo', repo, '--dir', dir], { cwd: dir, encoding: 'utf8' });
+    expect(/advisory/i.test(doctor.stdout), doctor.stdout);
+
+    freshBranch('private');
+    write('src/private.js', `export const p = ${serial};\n`);
+    const sha = commitAndPush('Private change');
+    const number = openPr('Private change', 'No contract.');
+    await sleep(25000);
+    const runs = api(`repos/${repo}/actions/runs?head_sha=${sha}`).workflow_runs;
+    const executed = runs.filter((r) => r.conclusion && !['skipped', 'cancelled'].includes(r.conclusion));
+    expect(executed.length === 0, `CI ran on a private repo: ${executed.map((r) => `${r.name}:${r.conclusion}`).join(', ')}`);
+
+    const gate = (...extra) =>
+      spawnSync('node', ['.pipeline/gate.mjs', 'local', '--pr', String(number), '--evidence', ...extra], { cwd: dir, encoding: 'utf8' });
+    let result = gate();
+    expect(result.status === 1, `the local gate passed with no contract: ${result.stdout}`);
+    expect(/PR contract is missing/.test(result.stdout), result.stdout);
+
+    const verified = spawnSync('node', ['.pipeline/verify.mjs', 'full'], { cwd: dir, encoding: 'utf8' });
+    expect(verified.status === 0, verified.stdout);
+    setBody(number, `${CONTRACT}${verdict(hashNow(), 1)}`);
+    result = gate();
+    expect(result.status === 0, `the local gate refused a good PR: ${result.stdout}`);
+    expect(/T1: ready to merge/.test(result.stdout), result.stdout);
+
+    const hook = spawnSync('git', ['push', 'origin', 'HEAD:main'], { cwd: dir, encoding: 'utf8', env: { ...process.env, PIPELINE_ADMIN_PUSH: '' } });
+    expect(hook.status !== 0 && /Blocked/.test(hook.stderr), `the pre-push hook did not block: ${hook.stderr}`);
+    return 'advisory reported; CI off; local gate correct; hook blocks';
+  } finally {
+    gh('repo', 'edit', repo, '--visibility', 'public', '--accept-visibility-change-consequences');
+    execFileSync('node', [cli, 'protect', '--repo', repo], { cwd: dir, encoding: 'utf8' });
+  }
+});
+
 git('checkout', '-q', 'main');
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

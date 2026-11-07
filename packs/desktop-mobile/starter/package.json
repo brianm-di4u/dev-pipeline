@@ -1,0 +1,11 @@
+{
+  "name": "{{SLUG}}",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "cd shared/test-harness && npm install && npx playwright install chromium",
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
+    "test": "node .pipeline/verify.mjs full"
+  }
+}
