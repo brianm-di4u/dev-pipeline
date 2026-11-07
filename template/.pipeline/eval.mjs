@@ -71,7 +71,10 @@ async function prepare(args) {
   const only = flag('--cases')?.split(',');
   const config = loadConfig();
   const reviewRules = readFileSync('REVIEW.md', 'utf8');
-  const selected = (await loadCases()).filter((kase) => (!split || kase.split === split) && (!only || only.includes(kase.id)));
+  const hardOnly = args.includes('--hard');
+  const selected = (await loadCases()).filter(
+    (kase) => (!split || kase.split === split) && (!only || only.includes(kase.id)) && (!hardOnly || kase.hard),
+  );
 
   const root = { path: out, nextIndex: 1 };
   mkdirSync(out, { recursive: true });

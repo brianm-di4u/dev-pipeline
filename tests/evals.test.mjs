@@ -14,8 +14,9 @@ test('the starter set is well formed', () => {
     assert.ok(Object.keys(kase.head).length > 0, kase.id);
     if (kase.kind === 'clean') assert.deepEqual(kase.expect, [], kase.id);
     for (const expected of kase.expect) {
-      const file = kase.head[expected.file];
-      assert.ok(file, `${kase.id}: ${expected.file} isn't in head`);
+      // A bug can live in a caller the change didn't touch, so base counts too.
+      const file = kase.head[expected.file] ?? kase.base[expected.file];
+      assert.ok(file, `${kase.id}: ${expected.file} isn't in the case`);
       const lines = file.split('\n').length;
       assert.ok(expected.from >= 1 && expected.to <= lines, `${kase.id}: lines ${expected.from}-${expected.to} of ${lines}`);
       assert.ok(expected.words.length > 0, kase.id);
@@ -31,6 +32,15 @@ test('the starter set has both splits and both kinds, including a prompt injecti
     assert.ok(cases.some((c) => c.split === split && c.kind === 'clean'));
   }
   assert.ok(cases.some((c) => c.id === 'injected-reviewer-instructions'));
+});
+
+test('a bug in an unchanged caller counts when reported at either end of the break', () => {
+  const kase = cases.find((c) => c.id === 'hard-broken-caller');
+  const atCaller = { severity: 'should', class: 'broken caller', file: 'src/profile.js', line: 4, claim: 'x', fix: 'y' };
+  const atChange = { severity: 'should', class: 'breaking shape', file: 'src/api.js', line: 5, claim: 'displayName breaks', fix: 'y' };
+  assert.equal(gradeCase(kase, { findings: [atCaller], missing: [] }).pass, true);
+  assert.equal(gradeCase(kase, { findings: [atChange], missing: [] }).pass, true);
+  assert.equal(gradeCase(kase, { findings: [], missing: [] }).pass, false);
 });
 
 test('clean cases contain tests, so that a seat has no fair complaint about evidence', () => {
