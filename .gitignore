@@ -5,6 +5,3 @@ node_modules/
 .pipeline/evidence/
 .claude/settings.local.json
 *.log
-
-# Local copies used to test the council from this repo.
-/.claude/agents/
