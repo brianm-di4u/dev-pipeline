@@ -1,0 +1,108 @@
+# Cuts a draft release, or promotes a published one to stable. It starts only by hand: the
+# restricted agent token can't dispatch a workflow, and this repo has no way to reserve version
+# tags on a personal account, so a tag pushed by anything else starts nothing here.
+#
+# The assets are built on the admin's PC and uploaded to the draft. See the release skill.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: cut makes a draft prerelease. promote marks a published release as stable.
+        type: choice
+        options: [cut, promote]
+        required: true
+      version:
+        description: The tag, such as v2.7.0 or v2.7.0-rc.1
+        required: true
+      sha:
+        description: For cut, the full commit on main
+        required: false
+
+permissions: {}
+
+jobs:
+  check:
+    if: ${{ inputs.action == 'cut' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ inputs.version }}
+      SHA: ${{ inputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The version and commit have to be right
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]] || { echo "Not a version: $VERSION"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Give the full commit SHA"; exit 1; }
+          git merge-base --is-ancestor "$SHA" HEAD || { echo "$SHA isn't on main"; exit 1; }
+          ! git rev-parse -q --verify "refs/tags/$VERSION" > /dev/null || { echo "$VERSION already exists"; exit 1; }
+          file=$(git show "$SHA:package.json" | node -p "JSON.parse(require('fs').readFileSync(0)).version")
+          [ "$file" = "${VERSION#v}" ] || [ "$file" = "$(echo "${VERSION#v}" | sed 's/-.*//')" ] || { echo "package.json says $file"; exit 1; }
+
+  app:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GWB_LEG: linux
+      GWB_SCOPE: all
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - run: npx playwright install --with-deps chromium
+      - run: node .pipeline/verify.mjs full
+
+  sidecar:
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GWB_LEG: sidecar
+      GWB_SCOPE: all
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/sidecar-setup
+      - run: node .pipeline/verify.mjs full
+
+  draft:
+    needs: [app, sidecar]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ inputs.version }}
+      SHA: ${{ inputs.sha }}
+    steps:
+      - run: gh release create "$VERSION" --target "$SHA" --draft --prerelease --title "$VERSION" --notes "Draft. Assets are uploaded and checked before this is published."
+
+  promote:
+    if: ${{ inputs.action == 'promote' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - run: gh release edit "$VERSION" --prerelease=false --latest

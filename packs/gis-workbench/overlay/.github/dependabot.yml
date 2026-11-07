@@ -1,0 +1,37 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  # Application dependencies come in one monthly group. Security fixes still arrive as they're
+  # published, because they don't wait for the schedule.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        patterns: ['*']
+  - package-ecosystem: cargo
+    directory: /crates
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      crates:
+        patterns: ['*']
+  - package-ecosystem: cargo
+    directory: /sidecar
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      sidecar:
+        patterns: ['*']

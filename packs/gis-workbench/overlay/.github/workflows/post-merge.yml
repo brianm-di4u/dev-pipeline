@@ -1,0 +1,77 @@
+# Detection after merge: verify everything on main, report a red main, and check the circuit
+# breaker. verify-scope runs everything here because the ref is main. The result of verify is
+# a fixed enum, so it's safe to pass along.
+name: post-merge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-merge
+  cancel-in-progress: false
+
+jobs:
+  app:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GWB_LEG: linux
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - run: npx playwright install --with-deps chromium
+      - run: node .pipeline/verify.mjs full
+
+  sidecar:
+    if: ${{ !github.event.repository.private }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GWB_LEG: sidecar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/sidecar-setup
+      - run: node .pipeline/verify.mjs full
+
+  verify:
+    needs: [app, sidecar]
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Both legs must succeed
+        env:
+          APP: ${{ needs.app.result }}
+          SIDECAR: ${{ needs.sidecar.result }}
+        run: test "$APP" = success && test "$SIDECAR" = success
+
+  record:
+    needs: verify
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - run: node .pipeline/monitor.mjs post-merge --result "${{ needs.verify.result }}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

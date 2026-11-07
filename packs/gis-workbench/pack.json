@@ -1,0 +1,66 @@
+{
+  "name": "gis-workbench",
+  "description": "GIS Workbench: a single-file offline browser app with Rust compiled to WASM and an optional native sidecar. Use `pipeline adopt`.",
+  "verify": {
+    "fast": ["npx vitest run"],
+    "full": ["node build/verify-scope.mjs"],
+    "e2e": ["npm run test:e2e"]
+  },
+  "t2Paths": [
+    "build/build.mjs",
+    "build/gates.mjs",
+    "build/rust.mjs",
+    "build/e2e.mjs",
+    "build/airgap.mjs",
+    "build/origins.json",
+    "build/eval-allowlist.json",
+    "build/packs-sources.json",
+    "build/check-policy*",
+    "build/check-quarantine.mjs",
+    "build/verify-scope.mjs",
+    "build/release/**",
+    "sidecar/**",
+    "crates/deny.toml",
+    "crates/rust-toolchain.toml",
+    "crates/.cargo/**",
+    "crates/vendor/**",
+    ".node-version",
+    "TRADEMARKS.md",
+    "docs/POLICY.md",
+    "SECURITY.md"
+  ],
+  "licenseExceptions": ["h5wasm", "resource-tracker", "squint-cljs"],
+  "council": {
+    "maxSeats": 5,
+    "t1Model": "sonnet",
+    "triggers": {
+      "ui": ["**/*.html", "**/*.css", "app/src/shell/**", "app/src/shell2/**", "app/src/mobile/**", "app/src/styles/**"],
+      "content": [
+        "**/package.json",
+        "**/package-lock.json",
+        "**/Cargo.toml",
+        "**/Cargo.lock",
+        "THIRD_PARTY*",
+        "LICENSE*",
+        "TRADEMARKS.md",
+        "build/packs-sources.json",
+        "build/natural-earth/**"
+      ]
+    },
+    "extraSeats": [
+      {
+        "agent": "council-geo-correctness",
+        "paths": [
+          "crates/**",
+          "app/src/geo/**",
+          "app/src/formats/**",
+          "app/src/sensor/**",
+          "app/src/tiles/**",
+          "app/src/vector/**",
+          "app/src/products/**",
+          "app/src/analysis/**"
+        ]
+      }
+    ]
+  }
+}
