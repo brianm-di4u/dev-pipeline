@@ -64,3 +64,4 @@ Running against real GitHub found things unit tests couldn't:
 - **`node --test tests/` behaves differently across Node versions.** The packs now pass a glob.
 - **Git Bash rewrites a leading slash** in arguments, turning `/approve` into a path. That's harmless for the gate, but it's why tests post comments as JSON.
 - **GitHub needs time after a visibility change.** It refuses another change, refuses settings changes, and even disables git access for a while. `pipeline protect` and the test now retry.
+- **A tag ruleset can't let the release workflow through on a personal account.** GitHub rejects GitHub Actions as a bypass actor with a 422, saying it must be part of the ruleset's source or owner organization. So a personal repo can't reserve version tags for a workflow. Instead, a project with a release to protect can trigger it by `workflow_dispatch`, which the restricted token can't do, and a tag pushed by an agent then starts nothing.

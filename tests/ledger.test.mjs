@@ -285,6 +285,25 @@ test('T2 always has the architect, and a three-voter panel with Opus', () => {
   assert.deepEqual(selection.panel, ['sonnet', 'sonnet', 'opus']);
 });
 
+test('a project seat joins when its paths change, and is the last to drop', () => {
+  const geo = { extraSeats: [{ agent: 'council-geo-correctness', paths: ['crates/**'] }] };
+  const names = (input) => selectSeats({ council: { ...council, ...geo }, ...input }).seats.map((s) => s.agent);
+  assert.ok(names({ tier: 1, paths: ['crates/gw/src/crs.rs'] }).includes('council-geo-correctness'));
+  assert.ok(!names({ tier: 1, paths: ['app/src/a.js'] }).includes('council-geo-correctness'));
+
+  const capped = selectSeats({ tier: 1, paths: ['crates/gw/src/crs.rs'], council: { ...council, ...geo, maxSeats: 5 } });
+  assert.ok(capped.seats.some((s) => s.agent === 'council-geo-correctness'));
+  assert.deepEqual(capped.dropped, ['council-reliability-engineer']);
+});
+
+test('t1Model applies to T1 seats only', () => {
+  const sonnet = { ...council, t1Model: 'sonnet' };
+  const t1 = selectSeats({ tier: 1, paths: ['src/a.js'], council: sonnet });
+  assert.ok(t1.seats.every((s) => s.model === 'sonnet'));
+  const t2 = selectSeats({ tier: 2, paths: ['.pipeline/gate.mjs'], council: sonnet });
+  assert.ok(t2.seats.every((s) => s.model === undefined), "T2 keeps each seat's own model");
+});
+
 test('the seat cap drops seats in order, and never security or architect on T2', () => {
   const selection = selectSeats({ tier: 2, paths: ['src/app.tsx', 'package.json', 'src/auth/x.ts'], council });
   const names = selection.seats.map((s) => s.agent);

@@ -26,6 +26,12 @@ That scaffolds the project, creates the GitHub repo, turns on protection, and pr
 
 Options: `--private`, `--repo owner/name`, and `--no-github`.
 
+Already have a repository? `pipeline adopt` adds the pipeline without replacing anything, and leaves committing and protection to you:
+
+```bash
+node "C:\Development Pipeline\bin\pipeline.mjs" adopt "C:\Projects\my-app" --pack generic --admin <login>
+```
+
 **Public or private matters.** On GitHub's Free plan, only public repos get CI and enforcement here. A private repo gets the same checks locally, but nothing stops a bypass, so agents stop at ready and you merge. `pipeline doctor` tells you which you've got.
 
 **Do this once:** give agents [a restricted token](docs/AGENT-TOKEN.md).

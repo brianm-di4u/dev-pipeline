@@ -3,6 +3,7 @@
 // owner's own credentials, which is why agents aren't allowed to run it.
 //
 //   pipeline init <dir> --pack <name> [--repo owner/name] [--private] [--no-github]
+//   pipeline adopt <dir> --pack <name> --admin <login> [--project <name>]
 //   pipeline protect [--repo owner/name] [--off]
 //   pipeline doctor [--repo owner/name]
 //   pipeline update [--check]
@@ -40,6 +41,7 @@ export const PROJECT_OWNED = [
   'pipeline.lock.json',
   'package.json',
   '.gitignore',
+  '.gitattributes',
   'THIRD_PARTY.md',
   /^docs\//,
   /^evals\/review\/(cases|clean)\/(?!_starter)/,
@@ -164,6 +166,15 @@ export function mergeConfig(config, pack) {
   };
 }
 
+// A managed file as this project should have it, with its tokens filled in.
+function renderManaged(file, source, tokens, pack) {
+  const content = readFileSync(source);
+  if (content.includes(0)) return content;
+  let text = replaceTokens(content.toString('utf8'), tokens);
+  if (CI_SETUP_WORKFLOWS.some((name) => file === `.github/workflows/${name}`)) text = applyCiSetup(text, pack);
+  return Buffer.from(text);
+}
+
 // Writes the template and pack into a directory, without touching git or GitHub.
 export function scaffold(target, { pack: packName, admin, project }) {
   const pack = loadPack(packName);
@@ -206,6 +217,62 @@ export function scaffold(target, { pack: packName, admin, project }) {
   return { pack, config };
 }
 
+// Brings the pipeline into an existing repository. Unlike `scaffold`, it never
+// replaces a file that's already there, and it doesn't commit or touch GitHub. Only
+// the files it wrote go in the lock, so a project's own version of a managed file
+// shows up as a conflict in `update` rather than being silently overwritten.
+export function adopt(target, { pack: packName, admin, project }) {
+  const pack = loadPack(packName);
+  if (!statSync(join(target, '.git'), { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(`${target} isn't the main checkout of a git repository.`);
+  }
+  if (existsSync(join(target, 'pipeline.lock.json'))) {
+    throw new Error(`${target} already uses the pipeline. Run pipeline update instead.`);
+  }
+
+  const tokens = { admin, project, pack: packName };
+  const sources = new Map();
+  for (const base of [TEMPLATE, ...packDirs(pack, 'overlay')]) {
+    for (const file of walk(base)) sources.set(file, join(base, file));
+  }
+
+  const written = [];
+  const kept = [];
+  for (const [file, source] of sources) {
+    if (file === '.gitignore') continue;
+    const destination = join(target, file);
+    if (existsSync(destination)) {
+      kept.push(file);
+      continue;
+    }
+    mkdirSync(dirname(destination), { recursive: true });
+    writeFileSync(destination, renderManaged(file, source, tokens, pack));
+    written.push(file);
+  }
+
+  if (written.includes('pipeline.config.json')) {
+    const configPath = join(target, 'pipeline.config.json');
+    const config = mergeConfig(JSON.parse(readFileSync(configPath, 'utf8')), pack);
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  }
+
+  const ignorePath = join(target, '.gitignore');
+  const ignore = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf8') : '';
+  const present = new Set(ignore.split(/\r?\n/));
+  const missing = [...readFileSync(join(TEMPLATE, '.gitignore'), 'utf8').split(/\r?\n/), ...(pack.gitignore ?? [])]
+    .filter((line, index, lines) => line && !present.has(line) && lines.indexOf(line) === index);
+  if (missing.length > 0) {
+    const gap = ignore && !ignore.endsWith('\n') ? '\n' : '';
+    writeFileSync(ignorePath, `${ignore}${gap}${missing.join('\n')}\n`);
+  }
+
+  if (existsSync(join(target, '.git', 'hooks', 'pre-push'))) kept.push('.git/hooks/pre-push');
+  else installGitHooks(target);
+
+  writeLock(target, packName, new Set(written));
+  return { pack, written, kept };
+}
+
 function managedSources(pack) {
   const sources = new Map();
   for (const base of [TEMPLATE, ...packDirs(pack, 'overlay')]) {
@@ -216,12 +283,12 @@ function managedSources(pack) {
   return sources;
 }
 
-export function writeLock(target, packName) {
+export function writeLock(target, packName, only = null) {
   const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
   const files = {};
   for (const file of managedSources(loadPack(packName)).keys()) {
     const path = join(target, file);
-    if (existsSync(path)) files[file] = sha256(readFileSync(path));
+    if (existsSync(path) && (!only || only.has(file))) files[file] = sha256(readFileSync(path));
   }
   writeFileSync(
     join(target, 'pipeline.lock.json'),
@@ -274,6 +341,21 @@ async function init({ positional, flags }) {
   console.log(`Created ${repo} (${flags.private ? 'private' : 'public'}).`);
   await protect({ flags: { repo } });
   return doctor({ flags: { repo, dir: target } });
+}
+
+async function adoptProject({ positional, flags }) {
+  const dir = positional[0];
+  const named = (value) => (typeof value === 'string' ? value : null);
+  if (!dir || !named(flags.pack) || !named(flags.admin)) {
+    throw new Error(`Usage: pipeline adopt <dir> --pack <${listPacks().join('|')}> --admin <login> [--project <name>]`);
+  }
+  const target = resolve(dir);
+  const project = named(flags.project) ?? basename(target);
+  const { written, kept } = adopt(target, { pack: flags.pack, admin: flags.admin, project });
+  console.log(`Adopted ${project} with the ${flags.pack} pack: ${written.length} files written, ${kept.length} kept.`);
+  for (const file of kept) console.log(`  KEPT ${file}`);
+  console.log('Nothing was committed or pushed. Review this on a branch, fill in the docs, and open a PR.');
+  return 0;
 }
 
 function ghApi(args, input) {
@@ -511,12 +593,7 @@ export function planUpdate(target) {
 
   const plan = { add: [], update: [], conflict: [], same: [] };
   for (const [file, source] of managedSources(pack)) {
-    let content = readFileSync(source);
-    if (!content.includes(0)) {
-      let text = replaceTokens(content.toString('utf8'), tokens);
-      if (CI_SETUP_WORKFLOWS.some((name) => file === `.github/workflows/${name}`)) text = applyCiSetup(text, pack);
-      content = Buffer.from(text);
-    }
+    const content = renderManaged(file, source, tokens, pack);
     const destination = join(target, file);
     const incomingHash = sha256(content);
     if (!existsSync(destination)) {
@@ -571,7 +648,7 @@ async function metrics({ flags }) {
   return 0;
 }
 
-const COMMANDS = { init, protect, doctor, update, metrics, packs: async () => (console.log(listPacks().join('\n')), 0) };
+const COMMANDS = { init, adopt: adoptProject, protect, doctor, update, metrics, packs: async () => (console.log(listPacks().join('\n')), 0) };
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);

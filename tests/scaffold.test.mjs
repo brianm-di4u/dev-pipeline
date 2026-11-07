@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
-import { compareVersions, listPacks, planUpdate, protectionBody, scaffold } from '../bin/pipeline.mjs';
+import { adopt, compareVersions, listPacks, planUpdate, protectionBody, scaffold } from '../bin/pipeline.mjs';
 
 const dirs = [];
 const fresh = () => {
@@ -169,4 +169,75 @@ test('init --no-github produces a committed repo that passes classify', () => {
     execFileSync('node', ['.pipeline/gate.mjs', 'classify', '--base', 'HEAD'], { cwd: target, encoding: 'utf8' }),
   );
   assert.equal(classified.paths.length, 0);
+});
+
+function existingRepo() {
+  const target = fresh();
+  mkdirSync(join(target, '.pipeline'), { recursive: true });
+  mkdirSync(join(target, 'docs'), { recursive: true });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: target });
+  writeFileSync(join(target, 'README.md'), '# Mine\n');
+  writeFileSync(join(target, '.gitignore'), 'node_modules/\n/out/');
+  writeFileSync(join(target, '.gitattributes'), 'dist/** binary\n');
+  writeFileSync(join(target, 'docs/PRD.md'), '# Real PRD\n');
+  writeFileSync(join(target, '.pipeline/verify.mjs'), '// a project file at a managed path\n');
+  return target;
+}
+
+test('adopt adds the pipeline to an existing repo without replacing anything', () => {
+  const target = existingRepo();
+  const { written, kept } = adopt(target, { pack: 'generic', admin: 'owner', project: 'My Project' });
+
+  for (const file of ['README.md', '.gitattributes', 'docs/PRD.md', '.pipeline/verify.mjs']) assert.ok(kept.includes(file), file);
+  assert.equal(readFileSync(join(target, 'README.md'), 'utf8'), '# Mine\n');
+  assert.equal(readFileSync(join(target, '.gitattributes'), 'utf8'), 'dist/** binary\n');
+  assert.equal(readFileSync(join(target, 'docs/PRD.md'), 'utf8'), '# Real PRD\n');
+  assert.equal(readFileSync(join(target, '.pipeline/verify.mjs'), 'utf8'), '// a project file at a managed path\n');
+
+  assert.ok(written.includes('.pipeline/gate.mjs'));
+  assert.ok(written.includes('.github/workflows/gate.yml'));
+  assert.ok(existsSync(join(target, '.git/hooks/pre-push')));
+
+  const config = JSON.parse(readFileSync(join(target, 'pipeline.config.json'), 'utf8'));
+  assert.deepEqual(config.admins, ['owner']);
+  assert.equal(config.project, 'My Project');
+  assert.doesNotMatch(readFileSync(join(target, 'CLAUDE.md'), 'utf8'), /\{\{/);
+
+  const ignore = readFileSync(join(target, '.gitignore'), 'utf8').split('\n');
+  assert.ok(ignore.includes('/out/'), 'a last line with no newline survives');
+  assert.ok(ignore.includes('.pipeline/evidence/'));
+  assert.equal(ignore.filter((line) => line === 'node_modules/').length, 1, 'lines are not duplicated');
+});
+
+test("update reports an adopted repo's own files as conflicts, and never overwrites them", () => {
+  const target = existingRepo();
+  adopt(target, { pack: 'generic', admin: 'owner', project: 'x' });
+  const { plan } = planUpdate(target);
+  assert.deepEqual(plan.conflict, ['.pipeline/verify.mjs']);
+  assert.deepEqual(plan.update, []);
+  assert.deepEqual(plan.add, []);
+});
+
+test('adopt refuses a folder that is not a repo, a linked worktree, or an adopted repo', () => {
+  const plain = fresh();
+  mkdirSync(plain, { recursive: true });
+  assert.throws(() => adopt(plain, { pack: 'generic', admin: 'o', project: 'x' }), /main checkout/);
+
+  const linked = fresh();
+  mkdirSync(linked, { recursive: true });
+  writeFileSync(join(linked, '.git'), 'gitdir: elsewhere\n');
+  assert.throws(() => adopt(linked, { pack: 'generic', admin: 'o', project: 'x' }), /main checkout/);
+
+  const target = existingRepo();
+  adopt(target, { pack: 'generic', admin: 'o', project: 'x' });
+  assert.throws(() => adopt(target, { pack: 'generic', admin: 'o', project: 'x' }), /already uses the pipeline/);
+});
+
+test('adopt keeps an existing pre-push hook', () => {
+  const target = existingRepo();
+  mkdirSync(join(target, '.git/hooks'), { recursive: true });
+  writeFileSync(join(target, '.git/hooks/pre-push'), '#!/bin/sh\n# mine\n');
+  const { kept } = adopt(target, { pack: 'generic', admin: 'o', project: 'x' });
+  assert.ok(kept.includes('.git/hooks/pre-push'));
+  assert.match(readFileSync(join(target, '.git/hooks/pre-push'), 'utf8'), /# mine/);
 });

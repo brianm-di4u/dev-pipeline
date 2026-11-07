@@ -88,12 +88,30 @@ export async function buildDigest({ client, repo, now, config, botIssues }) {
     mainRed: await open('pipeline:main-red'),
     audit: await open('pipeline:audit'),
   };
-  return { since, summary: summarize({ merged, commentsByPr, decisions, config }), decisions, state };
+  // Downloads are a nicety. A failed read shouldn't cost the admin the whole digest.
+  const releases = await client.list(`/repos/${repo}/releases?per_page=10`).catch(() => []);
+  return { since, summary: summarize({ merged, commentsByPr, decisions, config }), decisions, state, downloads: releaseDownloads(releases) };
+}
+
+// Total downloads per published release, with the most-fetched asset of each.
+export function releaseDownloads(releases, limit = 3) {
+  return releases
+    .filter((release) => !release.draft)
+    .slice(0, limit)
+    .map((release) => {
+      const assets = release.assets ?? [];
+      const top = assets.reduce((best, asset) => (asset.download_count > (best?.download_count ?? -1) ? asset : best), null);
+      return {
+        tag: release.tag_name,
+        total: assets.reduce((sum, asset) => sum + asset.download_count, 0),
+        top: top?.name ?? null,
+      };
+    });
 }
 
 const value = (v, suffix = '') => (v === null || v === undefined ? 'n/a' : `${Math.round(v * 10) / 10}${suffix}`);
 
-export function renderDigest({ since, summary: s, decisions, state }) {
+export function renderDigest({ since, summary: s, decisions, state, downloads = [] }) {
   const lines = [
     `Since ${since.slice(0, 10)}.`,
     '',
@@ -126,6 +144,11 @@ export function renderDigest({ since, summary: s, decisions, state }) {
   );
   const entries = Object.entries(s.dispositions);
   lines.push(...(entries.length ? entries.map(([k, v]) => `- ${k}: ${v}`) : ['No findings this week.']));
+
+  if (downloads.length > 0) {
+    lines.push('', '## Release downloads', '', '| Release | Downloads | Most fetched |', '|---|---|---|');
+    lines.push(...downloads.map((d) => `| ${d.tag} | ${d.total} | ${d.top ?? 'n/a'} |`));
+  }
 
   lines.push('', '## Every approval', '', 'If you did not make one of these, investigate it.', '');
   lines.push(...(s.approvals.length ? s.approvals.map((a) => `- #${a.pr} by ${a.by} at ${a.at}`) : ['None.']));
