@@ -184,7 +184,7 @@ async function digest(client, repo, config) {
   console.log(body);
 }
 
-async function main() {
+export async function main() {
   const [command, ...args] = process.argv.slice(2);
   const repo = process.env.GITHUB_REPOSITORY;
   const client = tokenClient(process.env.GITHUB_TOKEN);

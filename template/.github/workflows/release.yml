@@ -1,0 +1,50 @@
+# Staged releases. A version tag publishes to the `latest` channel as a GitHub
+# prerelease. Running this by hand with `promote` set to a tag moves that tag to
+# `stable`. Re-promoting an older tag is the rollback. Add the project's own build
+# and publishing steps where marked.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: Tag to promote to stable, such as v1.2.3
+        required: true
+
+permissions: {}
+
+jobs:
+  publish:
+    if: ${{ github.event_name == 'push' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # PIPELINE:CI-SETUP
+      - run: node .pipeline/verify.mjs full
+      # Add this project's build step here.
+      - run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --prerelease --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  promote:
+    if: ${{ github.event_name == 'workflow_dispatch' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.promote }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: gh release edit "$TAG" --prerelease=false --latest

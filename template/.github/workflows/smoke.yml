@@ -1,0 +1,32 @@
+# A scheduled check against the deployed app, for catching regressions fast. It does
+# nothing until the project sets a URL in pipeline.config.json under smoke.url.
+# On failure, it opens the same red-main issue that post-merge does.
+name: smoke
+
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  smoke:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: node .pipeline/smoke.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

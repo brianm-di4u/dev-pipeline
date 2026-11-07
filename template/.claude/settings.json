@@ -24,6 +24,8 @@
       "Read(~/.claude/.credentials.json)",
       "Read(~/.config/gh/**)",
       "Read(~/AppData/Roaming/GitHub CLI/**)",
+      "Read(./evals/review/_starter/cases.mjs)",
+      "Read(./evals/review/cases/**)",
       "mcp__terminal__run_in_terminal",
       "mcp__terminal__open_terminal_tab",
       "mcp__ccd_pr__set_auto_merge",

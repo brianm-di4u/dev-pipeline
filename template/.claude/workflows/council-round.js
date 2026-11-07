@@ -67,9 +67,13 @@ const scope =
     ? `Review the whole change: git diff ${plan.mergeBase} ${plan.head}`
     : `Review only what changed since the last round: git diff ${plan.lastReviewedSha} ${plan.head}. Also say whether these earlier findings are really resolved.\n${JSON.stringify(plan.openFindings)}`
 
-const brief = `You are one seat on a code review council. Your review is read-only.
+const location = plan.cwd
+  ? `The repository under review is at ${plan.cwd}. Change to it first, and read nothing outside it.\n\n`
+  : ''
 
-Intent of this change: ${plan.intent}
+const brief = `You are one seat on a code review council. You can run things, but you don't edit this change.
+
+${location}Intent of this change: ${plan.intent}
 Out of scope: ${plan.outOfScope ?? 'anything the intent does not need'}
 Risk tier: T${plan.tier}. Base: ${plan.mergeBase}. Head: ${plan.head}.
 ${scope}
@@ -144,7 +148,7 @@ if (candidates.length > 0 && plan.mode !== 'confirm') {
   const ballots = await parallel(
     voters.map((model, index) => () =>
       agent(
-        `Intent of this change: ${plan.intent}\nBase: ${plan.mergeBase}. Head: ${plan.head}.\n\nTry to refute each of these review findings against the source, as your instructions say. Vote on every key.\n\n${JSON.stringify(list, null, 2)}`,
+        `${location}Intent of this change: ${plan.intent}\nBase: ${plan.mergeBase}. Head: ${plan.head}.\n\nTry to refute each of these review findings against the source, as your instructions say. Vote on every key.\n\n${JSON.stringify(list, null, 2)}`,
         { agentType: 'council-verifier', label: `verifier-${index + 1}`, phase: 'Verify', schema: VOTES, model },
       ),
     ),
