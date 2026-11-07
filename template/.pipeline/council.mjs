@@ -22,6 +22,7 @@ import {
   resolveFinding,
   selectSeats,
 } from './lib/ledger.mjs';
+import { loadPersonas } from './lib/personas.mjs';
 import { classify, scriptsChanged } from './lib/tier.mjs';
 
 const BASE = 'origin/main';
@@ -98,6 +99,7 @@ function plan(args) {
         .filter((f) => f.status !== 'pre-existing')
         .map(({ id, severity, class: bugClass, file, line, claim, status }) => ({ id, severity, class: bugClass, file, line, claim, status })),
     });
+    if (args.includes('--inline-personas')) output.personas = loadPersonas();
     if (output.intent) ledger.intent = output.intent;
     if (output.outOfScope) ledger.outOfScope = output.outOfScope;
     saveLedger(ledger);

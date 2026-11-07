@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 import { loadConfig } from './lib/config.mjs';
 import { gradeCase, scoreCases } from './lib/evals.mjs';
 import { selectSeats } from './lib/ledger.mjs';
+import { loadPersonas } from './lib/personas.mjs';
 
 async function loadCases() {
   const starter = pathToFileURL(resolve('evals/review/_starter/cases.mjs')).href;
@@ -90,6 +91,7 @@ async function prepare(args) {
       evidenceDir,
       openFindings: [],
       ...selectSeats({ tier: 1, paths, council: config.council, diffLines: 20 }),
+      ...(args.includes('--inline-personas') ? { personas: loadPersonas() } : {}),
     });
   }
   writeFileSync(join(out, 'plans.json'), JSON.stringify(plans, null, 2));

@@ -37,6 +37,8 @@ Save the `plan` JSON, then call the Workflow tool with `scriptPath: ".claude/wor
 node .pipeline/council.mjs record <result.json>
 ```
 
+If the seats aren't registered in this session, which shows up as an unknown agent type, plan again with `--inline-personas`. It passes the same prompts and models inline.
+
 If the Workflow tool isn't available, do the same thing by hand, and run every agent in `isolation: "worktree"` with `Edit` and `Write` unavailable:
 
 1. Start each agent in `plan.seats` with the Agent tool, all in one message, using its `model` override if it has one. Give each seat the same brief `council-round.js` builds. A `mode: "confirm"` plan has no seats: give the brief to one `council-verifier` and ask only what the last fix got wrong or broke.
