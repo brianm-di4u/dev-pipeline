@@ -1,0 +1,36 @@
+# Opens an issue if the pipeline's branch protection has changed, and posts the
+# weekly digest. This detects tampering rather than preventing it: agents share the
+# owner's account, so see "Risks you're accepting" in dev-pipeline's docs/design.md.
+name: audit
+
+on:
+  schedule:
+    - cron: '17 13 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: node .pipeline/monitor.mjs audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: node .pipeline/monitor.mjs digest
+        if: ${{ always() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

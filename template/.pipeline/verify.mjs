@@ -51,6 +51,8 @@ async function main() {
     console.error(`Set verify.${level} in pipeline.config.json. It is still: ${JSON.stringify(configured)}`);
     return 2;
   }
+  // These always run before a full verify, whatever the stack.
+  if (level === 'full') commands.unshift('node .pipeline/check-licenses.mjs', 'node .pipeline/check-acceptance.mjs');
 
   const dir = join('.pipeline', 'evidence', evidenceDir());
   mkdirSync(dir, { recursive: true });
