@@ -47,8 +47,10 @@ async function next() {
     }
     const pulls = await client.list(`/repos/${repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=50`);
     const open = await client.list(`/repos/${repo}/pulls?state=open&base=main&per_page=50`);
+    // Dependency bumps need the same review, so they're worked like the agents' own PRs.
+    const workable = [...config.admins, ...(config.trustedBots ?? [])];
     const openOwnPrs = open
-      .filter((pr) => config.admins.includes(pr.user.login) && !pr.labels.some((l) => ['blocked:decision', 'parked'].includes(l.name)))
+      .filter((pr) => workable.includes(pr.user.login) && !pr.labels.some((l) => ['blocked:decision', 'parked'].includes(l.name)))
       .map((pr) => pr.number);
     state = { issues, mainRed: red.length > 0, redIssue: red[0]?.number ?? null, breakerTripped, merges: pulls, openOwnPrs };
   } catch (error) {

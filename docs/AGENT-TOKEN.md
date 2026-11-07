@@ -40,12 +40,17 @@ $env:GH_CONFIG_DIR = "$HOME\.config\gh-agent"
 gh auth login --with-token
 ```
 
-Paste the token, press Enter, and then press Ctrl+Z and Enter. Then make it the default for agent sessions by adding this to `~/.claude/settings.json`:
+Paste the token, press Enter, and then press Ctrl+Z and Enter. Then make it the default for agent sessions by adding this to `~/.claude/settings.json`. The `GIT_CONFIG` lines matter: on Windows, `git push` otherwise uses your own login from Git Credential Manager, whatever `gh` is set to.
 
 ```json
 {
   "env": {
-    "GH_CONFIG_DIR": "C:\\Users\\<you>\\.config\\gh-agent"
+    "GH_CONFIG_DIR": "C:\\Users\\<you>\\.config\\gh-agent",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "credential.helper",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_KEY_1": "credential.helper",
+    "GIT_CONFIG_VALUE_1": "!gh auth git-credential"
   }
 }
 ```
@@ -57,6 +62,12 @@ node "C:\Development Pipeline\bin\pipeline.mjs" doctor
 ```
 
 The `Agent token` line should now say `ok`.
+
+To prove the limits hold, run this from the same kind of session, against a clone of a sandbox repo. It tries to turn off protection, change settings, push a workflow, and forge the gate, and it checks that normal work still functions:
+
+```bash
+node "C:\Development Pipeline\tests\e2e\agent-token.mjs" <sandbox-clone>
+```
 
 ## When you need your own token
 

@@ -35,6 +35,7 @@
     "sizeWarnLines": 800
   },
   "merge": { "t0": "auto", "t1": "auto", "t2": "human" },
+  "privateAutoMerge": false,
   "council": {
     "maxRounds": 3,
     "maxRoundsSensitive": 5,
