@@ -175,11 +175,12 @@ async function digest(client, repo, config) {
   const data = await buildDigest({ client, repo, config, now, botIssues });
   const body = renderDigest(data, config);
   const week = now.toISOString().slice(0, 10);
-  await openIssue(client, repo, 'pipeline:digest', `Weekly digest: ${week}`, `${mentions(config)}\n\n${body}`);
-  // Keep only the newest digest open.
-  const open = await botIssues(client, repo, 'pipeline:digest');
-  for (const issue of open.sort((a, b) => b.number - a.number).slice(1)) {
-    await client.patch(`/repos/${repo}/issues/${issue.number}`, { state: 'closed' });
+  const created = await openIssue(client, repo, 'pipeline:digest', `Weekly digest: ${week}`, `${mentions(config)}\n\n${body}`);
+  // Keep only the newest digest open. A just-created issue may not be listed yet.
+  for (const issue of await botIssues(client, repo, 'pipeline:digest')) {
+    if (issue.number !== created.number) {
+      await client.patch(`/repos/${repo}/issues/${issue.number}`, { state: 'closed' });
+    }
   }
   console.log(body);
 }

@@ -307,6 +307,275 @@ export function refundAmount(order) {
     },
     expect: [{ file: 'src/upload.js', from: 2, to: 8, words: ['unbounded', 'forever', 'infinite', 'limit', 'never', 'backoff', 'a few', 'cap'] }],
   },
+  // Harder cases. A set everything passes can't tell you anything, so these need the
+  // reviewer to reason beyond the diff, or to hold back on code that only looks wrong.
+  {
+    id: 'hard-broken-caller',
+    split: 'train',
+    kind: 'bug',
+    hard: true,
+    intent: 'Return an etag along with the user, so that clients can cache responses.',
+    base: {
+      'package.json': PACKAGE,
+      'src/api.js': `import { db } from './db.js';
+
+export function getUser(id) {
+  return db.users.get(id);
+}
+`,
+      'src/db.js': `export const db = { users: new Map([[1, { name: 'Ada', version: 3 }]]) };
+`,
+      'src/profile.js': `import { getUser } from './api.js';
+
+export function displayName(id) {
+  return getUser(id).name.toUpperCase();
+}
+`,
+    },
+    head: {
+      'src/api.js': `import { db } from './db.js';
+
+export function getUser(id) {
+  const user = db.users.get(id);
+  return { user, etag: 'v' + user.version };
+}
+`,
+    },
+    expect: [{ file: 'src/profile.js', from: 1, to: 5, words: ['caller', 'name', 'undefined', 'displayname', 'shape', 'break'] }],
+    alsoAccept: [{ file: 'src/api.js', from: 3, to: 6, words: ['caller', 'displayname', 'profile', 'shape', 'break'] }],
+  },
+  {
+    id: 'hard-check-then-act-race',
+    split: 'test',
+    kind: 'bug',
+    hard: true,
+    intent: 'Let a user withdraw from their balance. The balance must never go negative. The service handles requests concurrently.',
+    base: {
+      'package.json': PACKAGE,
+      'src/ledger.js': `const balances = new Map();
+
+export async function getBalance(id) {
+  await new Promise((done) => setTimeout(done, 1));
+  return balances.get(id) ?? 0;
+}
+
+export async function setBalance(id, amount) {
+  await new Promise((done) => setTimeout(done, 1));
+  balances.set(id, amount);
+}
+`,
+    },
+    head: {
+      'src/withdraw.js': `import { getBalance, setBalance } from './ledger.js';
+
+export async function withdraw(id, amount) {
+  const balance = await getBalance(id);
+  if (balance < amount) throw new Error('Insufficient funds');
+  await setBalance(id, balance - amount);
+  return balance - amount;
+}
+`,
+    },
+    expect: [{ file: 'src/withdraw.js', from: 3, to: 8, words: ['race', 'concurren', 'atomic', 'toctou', 'interleav', 'double', 'lock', 'transaction'] }],
+  },
+  {
+    id: 'hard-daylight-saving',
+    split: 'train',
+    kind: 'bug',
+    hard: true,
+    intent: 'Work out due dates: the same local time of day, n calendar days later.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/due.js': `const DAY = 24 * 60 * 60 * 1000;
+
+export function dueDate(start, days) {
+  return new Date(start.getTime() + days * DAY);
+}
+`,
+    },
+    expect: [{ file: 'src/due.js', from: 1, to: 5, words: ['dst', 'daylight', 'calendar', 'setdate', '24', 'local time', 'time zone', 'timezone'] }],
+  },
+  {
+    id: 'hard-cache-key-collision',
+    split: 'test',
+    kind: 'bug',
+    hard: true,
+    intent: 'Cache permission checks per user and resource, because they are slow. User and resource IDs are free-form strings.',
+    base: {
+      'package.json': PACKAGE,
+      'src/acl.js': `export function allowed(acl, user, resource) {
+  return acl.some((rule) => rule.user === user && rule.resource === resource);
+}
+`,
+    },
+    head: {
+      'src/cached.js': `import { allowed } from './acl.js';
+
+const cache = new Map();
+
+export function isAllowed(acl, user, resource) {
+  const key = user + resource;
+  if (!cache.has(key)) cache.set(key, allowed(acl, user, resource));
+  return cache.get(key);
+}
+`,
+    },
+    expect: [{ file: 'src/cached.js', from: 5, to: 9, words: ['collision', 'delimiter', 'separator', 'ambiguous', 'concatenat', 'same key', 'key'] }],
+  },
+  {
+    id: 'hard-float-money',
+    split: 'train',
+    kind: 'bug',
+    hard: true,
+    intent: 'Compute invoice totals in dollars from line prices. The total printed must match the sum of the printed lines, to the cent.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/invoice.js': `export function invoiceTotal(lines) {
+  return lines.reduce((sum, line) => sum + line.price * line.quantity, 0);
+}
+
+export function printInvoice(lines) {
+  const rows = lines.map((line) => (line.price * line.quantity).toFixed(2));
+  return { rows, total: invoiceTotal(lines).toFixed(2) };
+}
+`,
+    },
+    expect: [{ file: 'src/invoice.js', from: 1, to: 8, words: ['float', 'cent', 'round', 'precision', 'integer', 'tofixed'] }],
+  },
+  {
+    id: 'hard-cursor-skips-ties',
+    split: 'test',
+    kind: 'bug',
+    hard: true,
+    intent: 'Add cursor pagination for events, using createdAt as the cursor, so that clients see every event exactly once. Many events can share a timestamp.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/events.js': `export function nextPage(events, cursor, size) {
+  const sorted = [...events].sort((a, b) => a.createdAt - b.createdAt);
+  const rows = sorted.filter((event) => cursor === null || event.createdAt > cursor).slice(0, size);
+  return { rows, cursor: rows.at(-1)?.createdAt ?? cursor };
+}
+`,
+    },
+    expect: [{ file: 'src/events.js', from: 1, to: 5, words: ['tie', 'same timestamp', 'share', 'duplicate', 'skip', 'unique', 'lost', 'dropped', 'missed'] }],
+  },
+  {
+    id: 'hard-retry-double-charge',
+    split: 'train',
+    kind: 'bug',
+    hard: true,
+    intent: 'Retry card charges when the network times out, so that a flaky connection does not lose a sale.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/charge.js': `export async function chargeWithRetry(gateway, order, attempts = 3) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await gateway.charge({ amount: order.total, card: order.card });
+    } catch (error) {
+      if (error.code !== 'ETIMEDOUT' || attempt === attempts) throw error;
+    }
+  }
+}
+`,
+    },
+    expect: [{ file: 'src/charge.js', from: 1, to: 9, words: ['idempot', 'double', 'twice', 'duplicate', 'charged'] }],
+  },
+  {
+    id: 'hard-clean-dynamic-placeholders',
+    split: 'test',
+    kind: 'clean',
+    hard: true,
+    intent: 'Look up several users by ID at once, with a test.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/lookup.js': `export function findByIds(db, ids) {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(', ');
+  return db.query(\`SELECT id, name FROM users WHERE id IN (\${placeholders})\`, ids);
+}
+`,
+      'tests/lookup.test.js': `import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { findByIds } from '../src/lookup.js';
+
+test('binds every ID as a parameter', () => {
+  const calls = [];
+  const db = { query: (sql, params) => (calls.push({ sql, params }), []) };
+  findByIds(db, [1, 2, 3]);
+  assert.equal(calls[0].sql, 'SELECT id, name FROM users WHERE id IN (?, ?, ?)');
+  assert.deepEqual(calls[0].params, [1, 2, 3]);
+});
+
+test('skips the query when there is nothing to look up', () => {
+  const db = { query: () => assert.fail('should not query') };
+  assert.deepEqual(findByIds(db, []), []);
+});
+`,
+    },
+    expect: [],
+  },
+  {
+    id: 'hard-clean-null-idiom',
+    split: 'train',
+    kind: 'clean',
+    hard: true,
+    intent: 'Treat a missing setting, whether null or undefined, as "use the default", while keeping 0 and an empty string as real values. With a test.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/settings.js': `export function setting(settings, name, fallback) {
+  const value = settings[name];
+  return value == null ? fallback : value;
+}
+`,
+      'tests/settings.test.js': `import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { setting } from '../src/settings.js';
+
+test('null and undefined use the default', () => {
+  assert.equal(setting({ a: null }, 'a', 5), 5);
+  assert.equal(setting({}, 'a', 5), 5);
+});
+
+test('0 and an empty string are real values', () => {
+  assert.equal(setting({ a: 0 }, 'a', 5), 0);
+  assert.equal(setting({ a: '' }, 'a', 5), '');
+});
+`,
+    },
+    expect: [],
+  },
+  {
+    id: 'hard-clean-innerhtml-clear',
+    split: 'test',
+    kind: 'clean',
+    hard: true,
+    intent: 'Show search results as plain text, clearing the old ones first, with a test.',
+    base: { 'package.json': PACKAGE },
+    head: {
+      'src/results.js': `export function showResults(list, results, createItem) {
+  list.innerHTML = '';
+  for (const result of results) {
+    const item = createItem();
+    item.textContent = result.title;
+    list.appendChild(item);
+  }
+}
+`,
+      'tests/results.test.js': `import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { showResults } from '../src/results.js';
+
+test('clears old results, and renders titles as text', () => {
+  const appended = [];
+  const list = { innerHTML: '<li>old</li>', appendChild: (item) => appended.push(item) };
+  showResults(list, [{ title: '<b>x</b>' }], () => ({}));
+  assert.equal(list.innerHTML, '');
+  assert.equal(appended[0].textContent, '<b>x</b>');
+});
+`,
+    },
+    expect: [],
+  },
   {
     id: 'clean-refactor',
     split: 'train',

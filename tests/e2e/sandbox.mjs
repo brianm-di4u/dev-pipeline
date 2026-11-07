@@ -689,9 +689,23 @@ await scenario('U1', 'The audit notices weakened protection, and the digest is p
   return 'healthy, flagged, repaired; digest posted';
 });
 
+// GitHub refuses a visibility change while the last one is still settling.
+async function setVisibility(visibility) {
+  const deadline = Date.now() + 300000;
+  for (;;) {
+    const result = spawnSync('gh', ['repo', 'edit', repo, '--visibility', visibility, '--accept-visibility-change-consequences'], {
+      cwd: dir,
+      encoding: 'utf8',
+    });
+    if (result.status === 0) return;
+    if (Date.now() > deadline) throw new Error(`Could not set ${visibility}: ${result.stderr}`);
+    await sleep(15000);
+  }
+}
+
 await scenario('P1', 'Private mode: CI stays off, the local gate still blocks, and doctor says advisory', async () => {
   const cli = new URL('../../bin/pipeline.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1').replaceAll('%20', ' ');
-  gh('repo', 'edit', repo, '--visibility', 'private', '--accept-visibility-change-consequences');
+  await setVisibility('private');
   try {
     const doctor = spawnSync('node', [cli, 'doctor', '--repo', repo, '--dir', dir], { cwd: dir, encoding: 'utf8' });
     expect(/advisory/i.test(doctor.stdout), doctor.stdout);
@@ -722,7 +736,7 @@ await scenario('P1', 'Private mode: CI stays off, the local gate still blocks, a
     expect(hook.status !== 0 && /Blocked/.test(hook.stderr), `the pre-push hook did not block: ${hook.stderr}`);
     return 'advisory reported; CI off; local gate correct; hook blocks';
   } finally {
-    gh('repo', 'edit', repo, '--visibility', 'public', '--accept-visibility-change-consequences');
+    await setVisibility('public');
     execFileSync('node', [cli, 'protect', '--repo', repo], { cwd: dir, encoding: 'utf8' });
   }
 });
