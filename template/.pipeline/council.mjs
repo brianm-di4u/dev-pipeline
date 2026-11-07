@@ -26,7 +26,13 @@ import { loadPersonas } from './lib/personas.mjs';
 import { classify, scriptsChanged } from './lib/tier.mjs';
 
 const BASE = 'origin/main';
-const branch = () => git(['rev-parse', '--abbrev-ref', 'HEAD']).trim().replaceAll('/', '__');
+function branch() {
+  const name = git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+  // A reviewer running in a shared checkout can leave it detached. Stop rather than
+  // start a second ledger, or commit to nowhere.
+  if (name === 'HEAD') throw new Error('HEAD is detached. Check out your branch first.');
+  return name.replaceAll('/', '__');
+}
 const ledgerPath = () => join('.pipeline', 'runs', `${branch()}.json`);
 
 function loadLedger() {
@@ -103,6 +109,7 @@ function plan(args) {
     // Normally reviewers get disposable worktrees. --cwd pins them to a folder instead,
     // for hosts where the session isn't running in this repo.
     if (args.includes('--cwd')) output.cwd = resolve(option(args, '--cwd')).replaceAll('\\', '/');
+    ledger.plannedHead = output.head;
     if (output.intent) ledger.intent = output.intent;
     if (output.outOfScope) ledger.outOfScope = output.outOfScope;
     saveLedger(ledger);
@@ -124,6 +131,11 @@ function record([file]) {
   const ctx = context();
   const ledger = loadLedger();
   const result = JSON.parse(readFileSync(file, 'utf8'));
+  const head = git(['rev-parse', 'HEAD']).trim();
+  if (ledger.plannedHead && ledger.plannedHead !== head) {
+    console.error(`HEAD moved during the round, from ${ledger.plannedHead} to ${head}. Those reviewers looked at something else, so plan again.`);
+    return 1;
+  }
   const step = nextStep({
     ledger,
     tier: ledger.raise ? Math.max(ctx.tier, 2) : ctx.tier,

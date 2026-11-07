@@ -137,6 +137,28 @@ test('the whole loop, from a dirty tree to a verdict the gate accepts', async ()
   assert.notEqual(council('verdict').status, 0, 'the verdict refuses changed content');
 });
 
+test('a round is refused if HEAD moved while it ran, or the checkout was left detached', () => {
+  git('checkout', '-q', '-b', 'moved', 'main');
+  writeFileSync(join(dir, 'moved.js'), 'export const m = 1;\n');
+  commit('Moved');
+  assert.equal(verify().status, 0);
+  assert.equal(plan('--intent', 'Add m').status, 'review');
+
+  writeFileSync(join(dir, 'moved.js'), 'export const m = 2;\n');
+  commit('Someone moved HEAD');
+  const path = join(parent, 'late.json');
+  writeFileSync(path, JSON.stringify({ findings: [], seats: [], missing: [] }));
+  const refused = council('record', path);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /HEAD moved/);
+
+  git('checkout', '-q', '--detach');
+  const detached = council('plan');
+  assert.notEqual(detached.status, 0);
+  assert.match(detached.stderr, /detached/);
+  git('checkout', '-q', 'moved');
+});
+
 test('a protected path plans as T2, with the architect and an Opus voter', () => {
   git('checkout', '-q', '-b', 'protected', 'main');
   writeFileSync(join(dir, '.pipeline', 'note.md'), 'note\n');

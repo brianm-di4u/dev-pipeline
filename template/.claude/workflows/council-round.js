@@ -77,7 +77,7 @@ const location = plan.cwd
 const visibility = `First confirm you can see this change, by running: git cat-file -e ${plan.head}
 Set headVisible to true only if that succeeds. If it fails, set headVisible to false, return nothing else, and don't go looking for the code elsewhere.`
 
-const brief = `You are one seat on a code review council. You can run things, but you don't edit this change.
+const brief = `You are one seat on a code review council. You can run things, but you don't edit this change. Don't switch branches, reset, or check anything out: to look at a commit, use git show or git diff.
 
 ${location}${visibility}
 
