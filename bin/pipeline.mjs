@@ -168,9 +168,7 @@ export function scaffold(target, { pack: packName, admin, project }) {
 
   if (pack.gitignore?.length) {
     const ignore = join(target, '.gitignore');
-    writeFileSync(ignore, `${readFileSync(ignore, 'utf8')}${pack.gitignore.join('
-')}
-`);
+    writeFileSync(ignore, `${readFileSync(ignore, 'utf8')}${pack.gitignore.join('\n')}\n`);
   }
 
   writeLock(target, packName);

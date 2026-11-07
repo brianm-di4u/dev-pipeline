@@ -83,8 +83,8 @@ function startServer() {
 // Real-GPU Chromium (ANGLE on the platform's native API). Headless defaults to SwiftShader, which makes
 // WebGL 5–20× slower than any real device and its fps meaningless.
 const GPU_ARGS = ['--enable-gpu', '--ignore-gpu-blocklist',
-const UNCAPPED_ARGS = ['--disable-gpu-vsync', '--disable-frame-rate-limit'];
   `--use-angle=${process.platform === 'win32' ? 'd3d11' : process.platform === 'darwin' ? 'metal' : 'gl'}`];
+const UNCAPPED_ARGS = ['--disable-gpu-vsync', '--disable-frame-rate-limit'];
 
 async function loadTests(testDir, only, file = null) {
   if (!fs.existsSync(testDir)) return [];
