@@ -14,7 +14,7 @@ You need Node 22+, git, an authenticated `gh`, and Claude Code v2.1.295+.
 node "C:\Development Pipeline\bin\pipeline.mjs" init "C:\Projects\my-app" --pack node-ts
 ```
 
-That scaffolds the project, creates the GitHub repo, turns on protection, and prints what's enforced. Then open the project in Claude Code and run `/start-project`.
+That scaffolds the project, creates the GitHub repo, turns on protection, and prints what's enforced. Then open the project in Claude Code, accept the trust prompt so that its rules apply, and run `/start-project`.
 
 | Pack | For |
 |---|---|

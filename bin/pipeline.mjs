@@ -20,6 +20,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -447,6 +448,15 @@ async function doctor({ flags }) {
     add('fail', 'pipeline.config.json', `not found in ${cwd}`);
   }
   add(existsSync(join(cwd, '.git', 'hooks', 'pre-push')) ? 'ok' : 'warn', 'pre-push hook', '');
+
+  // Until a folder is trusted, Claude Code ignores its permission rules, so unattended runs would stall on prompts.
+  try {
+    const state = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8'));
+    const trusted = state.projects?.[cwd.replaceAll('\\', '/')]?.hasTrustDialogAccepted === true;
+    add(trusted ? 'ok' : 'warn', 'Workspace trust', trusted ? '' : 'open this folder in Claude Code once and accept the trust prompt.');
+  } catch {
+    add('warn', 'Workspace trust', 'unknown. Open this folder in Claude Code once and accept the trust prompt.');
+  }
 
   let enforcement = 'unknown';
   const repo = flags.repo ?? tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], { cwd });

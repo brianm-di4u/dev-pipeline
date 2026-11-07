@@ -197,6 +197,8 @@ export function recordRound(ledger, { mode, round, hash, sha, diffLines, result 
   }
 
   const complete = (result.missing ?? []).length === 0;
+  // A rerun replaces an incomplete round, so a timeout doesn't use up the budget.
+  if (ledger.rounds.at(-1)?.complete === false) ledger.rounds.pop();
   ledger.rounds.push({
     number: round,
     mode,
