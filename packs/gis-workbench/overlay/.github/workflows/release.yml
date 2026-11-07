@@ -45,7 +45,8 @@ jobs:
           git merge-base --is-ancestor "$SHA" HEAD || { echo "$SHA isn't on main"; exit 1; }
           ! git rev-parse -q --verify "refs/tags/$VERSION" > /dev/null || { echo "$VERSION already exists"; exit 1; }
           file=$(git show "$SHA:package.json" | node -p "JSON.parse(require('fs').readFileSync(0)).version")
-          [ "$file" = "${VERSION#v}" ] || [ "$file" = "$(echo "${VERSION#v}" | sed 's/-.*//')" ] || { echo "package.json says $file"; exit 1; }
+          number=${VERSION#v}
+          [ "$file" = "$number" ] || [ "$file" = "${number%%-*}" ] || { echo "package.json says $file"; exit 1; }
 
   app:
     needs: check
