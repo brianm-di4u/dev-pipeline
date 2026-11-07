@@ -23,7 +23,7 @@ jobs:
       - uses: ./.github/actions/app-setup
       - run: npx playwright install --with-deps chromium
       - run: node build/build.mjs --strict
-      - run: npx playwright test --project=chrome
+      - run: npx playwright test --project=nightly
 
   firefox:
     if: ${{ !github.event.repository.private }}
