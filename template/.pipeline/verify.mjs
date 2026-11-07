@@ -52,7 +52,9 @@ async function main() {
     return 2;
   }
   // These always run before a full verify, whatever the stack.
-  if (level === 'full') commands.unshift('node .pipeline/check-licenses.mjs', 'node .pipeline/check-acceptance.mjs');
+  if (level === 'full') {
+    commands.unshift('node .pipeline/check-licenses.mjs', 'node .pipeline/check-acceptance.mjs', 'node .pipeline/check-docs.mjs');
+  }
 
   const dir = join('.pipeline', 'evidence', evidenceDir());
   mkdirSync(dir, { recursive: true });

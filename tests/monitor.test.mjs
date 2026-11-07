@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { allowlist, isAllowed, problems } from '../template/.pipeline/check-licenses.mjs';
 import { criteria, uncovered } from '../template/.pipeline/check-acceptance.mjs';
+import { citedPaths, missingPaths } from '../template/.pipeline/check-docs.mjs';
 import { evaluateBreaker } from '../template/.pipeline/lib/breaker.mjs';
 import { percentile, renderDigest, summarize } from '../template/.pipeline/lib/digest.mjs';
 import { auditProblems } from '../template/.pipeline/monitor.mjs';
@@ -169,6 +170,19 @@ test('a GPL dependency is flagged, and an explicit exception clears it', () => {
   };
   assert.deepEqual(problems(lock, allowed).map((p) => p.name), ['bad', 'unlicensed']);
   assert.deepEqual(problems(lock, allowed, ['bad']).map((p) => p.name), ['unlicensed']);
+});
+
+test('instruction files fail when they cite a path that no longer exists', () => {
+  const markdown = [
+    '@.pipeline/AUTONOMY.md',
+    'See [the PRD](docs/PRD.md#goals), [the site](https://example.com), and [gone](docs/gone.md).',
+    '- `node .pipeline/verify.mjs fast`: quick checks.',
+    '- `node .pipeline/removed.mjs`: gone too.',
+    '<!-- [ignored](docs/comment.md) -->',
+  ].join('\n');
+  assert.deepEqual(citedPaths(markdown).sort(), ['.pipeline/AUTONOMY.md', '.pipeline/removed.mjs', '.pipeline/verify.mjs', 'docs/PRD.md', 'docs/gone.md']);
+  const exists = (path) => !/gone|removed/.test(path);
+  assert.deepEqual(missingPaths('CLAUDE.md', markdown, exists).sort(), ['.pipeline/removed.mjs', 'docs/gone.md']);
 });
 
 test('acceptance criteria: blank placeholders do not count, and each real one needs a test', () => {

@@ -6,6 +6,7 @@
 //   pipeline protect [--repo owner/name] [--off]
 //   pipeline doctor [--repo owner/name]
 //   pipeline update [--check]
+//   pipeline metrics [--repo owner/name]
 //   pipeline packs
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -549,7 +550,23 @@ async function update({ flags }) {
   return 0;
 }
 
-const COMMANDS = { init, protect, doctor, update, packs: async () => (console.log(listPacks().join('\n')), 0) };
+// The weekly digest, on demand. It's the only digest a private repo gets, since CI
+// doesn't run there.
+async function metrics({ flags }) {
+  const repo = flags.repo ?? currentRepo();
+  const config = JSON.parse(readFileSync(join(resolve(flags.dir ?? '.'), 'pipeline.config.json'), 'utf8'));
+  const lib = (name) => pathToFileURL(join(TEMPLATE, '.pipeline', 'lib', name)).href;
+  const { buildDigest, renderDigest } = await import(lib('digest.mjs'));
+  const { cliClient } = await import(lib('github.mjs'));
+  const bot = encodeURIComponent('github-actions[bot]');
+  const botIssues = (client, name, label, state = 'open') =>
+    client.list(`/repos/${name}/issues?state=${state}&labels=${encodeURIComponent(label)}&creator=${bot}&per_page=100`);
+  const data = await buildDigest({ client: cliClient(), repo, config, now: new Date(), botIssues });
+  console.log(renderDigest(data, config));
+  return 0;
+}
+
+const COMMANDS = { init, protect, doctor, update, metrics, packs: async () => (console.log(listPacks().join('\n')), 0) };
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
