@@ -4,7 +4,7 @@ import { allowlist, isAllowed, problems } from '../template/.pipeline/check-lice
 import { criteria, uncovered } from '../template/.pipeline/check-acceptance.mjs';
 import { citedPaths, missingPaths } from '../template/.pipeline/check-docs.mjs';
 import { evaluateBreaker } from '../template/.pipeline/lib/breaker.mjs';
-import { percentile, renderDigest, summarize } from '../template/.pipeline/lib/digest.mjs';
+import { percentile, releaseDownloads, renderDigest, summarize } from '../template/.pipeline/lib/digest.mjs';
 import { auditProblems } from '../template/.pipeline/monitor.mjs';
 
 const config = { admins: ['owner'], breaker: { window: 20, maxFailures: 3 } };
@@ -190,4 +190,28 @@ test('acceptance criteria: blank placeholders do not count, and each real one ne
   const prd = '- **AC-1:** A tap scores a point.\n- **AC-2:** Scores persist.\n- **AC-10:** Works offline.\n';
   assert.deepEqual(criteria(prd), ['AC-1', 'AC-2', 'AC-10']);
   assert.deepEqual(uncovered(['AC-1', 'AC-2', 'AC-10'], "test('AC-1: scores', ...); test('AC-100: x', ...)"), ['AC-2', 'AC-10']);
+});
+
+test('the digest lists release downloads, skips drafts, and omits the section with no releases', () => {
+  const downloads = releaseDownloads([
+    { tag_name: 'v3', draft: true, assets: [{ name: 'x', download_count: 99 }] },
+    { tag_name: 'v2', draft: false, assets: [{ name: 'a', download_count: 2 }, { name: 'b', download_count: 5 }] },
+    { tag_name: 'v1', draft: false, assets: [] },
+  ]);
+  assert.deepEqual(downloads, [
+    { tag: 'v2', total: 7, top: 'b' },
+    { tag: 'v1', total: 0, top: null },
+  ]);
+
+  const base = {
+    since: '2026-11-01T00:00:00Z',
+    summary: {
+      merged: 0, byTier: { 0: 0, 1: 0, 2: 0, revert: 0 }, humanTouches: {}, decisionWait: {}, rounds: {}, size: {},
+      reverted: [], dispositions: {}, approvals: [],
+    },
+    decisions: [],
+    state: { breaker: [], mainRed: [], audit: [] },
+  };
+  assert.doesNotMatch(renderDigest(base), /Release downloads/);
+  assert.match(renderDigest({ ...base, downloads }), /\| v2 \| 7 \| b \|/);
 });

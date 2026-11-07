@@ -1,0 +1,68 @@
+# Runs the PR's code with a read-only token and no secrets. A PR can edit this file, so the gate
+# treats any change under .github/ as T2 and reads the result of the `verify` job itself, so that
+# job must keep its name. See gate.yml.
+#
+# Each leg always runs and decides for itself what the change needs, because GitHub counts a
+# skipped job as passing and the gate accepts only success.
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GWB_LEG: linux
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - run: npx playwright install --with-deps chromium
+      - run: node .pipeline/verify.mjs full
+      - name: Keep the evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reports
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  sidecar:
+    if: ${{ !github.event.repository.private }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GWB_LEG: sidecar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/sidecar-setup
+      - run: node .pipeline/verify.mjs full
+
+  verify:
+    needs: [app, sidecar]
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Both legs must succeed
+        env:
+          APP: ${{ needs.app.result }}
+          SIDECAR: ${{ needs.sidecar.result }}
+        run: test "$APP" = success && test "$SIDECAR" = success

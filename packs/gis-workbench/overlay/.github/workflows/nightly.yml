@@ -1,0 +1,112 @@
+# The long checks that can't sit on the PR path. A failure opens one triage issue and doesn't
+# block merges: the sweeps are slow enough that a flake here shouldn't stop the line, and the
+# release skill reads open nightly issues before anything ships. The iOS simulator run is its own
+# scheduled workflow, lite-ios-sim.yml, because it needs a macOS runner.
+name: nightly
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chrome:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - run: npx playwright install --with-deps chromium
+      - run: node build/build.mjs --strict
+      - run: npx playwright test --project=nightly
+
+  firefox:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - run: npx playwright install --with-deps firefox
+      - run: node build/build.mjs --strict
+      - run: npx playwright test --config playwright.firefox.config.js
+
+  webkit:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - run: npx playwright install --with-deps webkit
+      - run: node build/build.mjs --strict
+      - run: npm run test:webkit
+
+  fuzz:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/app-setup
+      - name: Every parser target, in release mode
+        working-directory: crates
+        run: cargo test --release -p gw-fuzz
+
+  audit:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit,gitleaks
+      - name: npm advisories
+        run: npm audit --audit-level=high
+      - name: Crate advisories
+        run: |
+          cargo audit --file crates/Cargo.lock
+          cargo audit --file sidecar/Cargo.lock
+      - name: Secrets in history
+        run: gitleaks git --config .gitleaks.toml --redact --no-banner
+
+  report:
+    needs: [chrome, firefox, webkit, fuzz, audit]
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RESULTS: ${{ toJSON(needs) }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open one issue if anything failed
+        run: |
+          failed=$(echo "$RESULTS" | jq -r 'to_entries | map(select(.value.result != "success") | .key) | join(", ")')
+          if [ -z "$failed" ]; then echo "All clear."; exit 0; fi
+          gh label create triage --color fbca04 --force > /dev/null
+          open=$(gh issue list --label triage --search "Nightly failed in:title" --state open --json number --jq 'length')
+          if [ "$open" != "0" ]; then echo "An issue is already open."; exit 0; fi
+          gh issue create --label triage --title "Nightly failed: $failed" --body "These jobs did not succeed: $failed. Run: $RUN_URL"

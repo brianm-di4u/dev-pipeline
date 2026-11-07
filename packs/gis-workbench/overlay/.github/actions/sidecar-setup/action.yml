@@ -1,0 +1,18 @@
+name: Sidecar setup
+description: The tools the native sidecar needs on Windows.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version-file: .node-version
+    - name: Install the Rust toolchain from sidecar/rust-toolchain.toml
+      shell: bash
+      working-directory: sidecar
+      run: rustup toolchain install
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        workspaces: sidecar
+    - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
+      with:
+        tool: cargo-deny@0.20.2
