@@ -43,10 +43,12 @@ If the Workflow tool isn't available, do the same thing by hand, and run every a
 
 1. Start each agent in `plan.seats` with the Agent tool, all in one message, using its `model` override if it has one. Give each seat the same brief `council-round.js` builds. A `mode: "confirm"` plan has no seats: give the brief to one `council-verifier` and ask only what the last fix got wrong or broke.
 2. Dedupe the findings by file, line, and class.
-3. Start `plan.panel` verifiers (`council-verifier`) on the deduped list. A finding survives only if a majority of the full panel fails to refute it. If the votes that kept it are mostly `downgraded`, it becomes a `nit`.
+3. Start `plan.panel` verifiers (`council-verifier`) on the deduped list. A finding is dropped only if a majority of the full panel refutes it with evidence. If the votes that kept it are mostly `downgraded`, it becomes a `nit`.
 4. Write `{"findings": [...], "seats": [...answered...], "missing": [...no answer...], "refuted": n}` to a file and record it.
 
-A timeout or no reply isn't approval. `record` marks the round incomplete, and `plan` has you run it again.
+A review that didn't really happen must never look like one that found nothing. List a seat or verifier as `missing` if it timed out, gave no reply, reported `headVisible: false`, voted `cannot-check`, or skipped a finding. `record` then marks the round incomplete, and `plan` has you run it again.
+
+If that keeps happening, stop and report it. Don't work around it: the reviewers can't see the code.
 
 ## Answering findings
 

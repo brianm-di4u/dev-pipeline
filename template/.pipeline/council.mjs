@@ -100,6 +100,9 @@ function plan(args) {
         .map(({ id, severity, class: bugClass, file, line, claim, status }) => ({ id, severity, class: bugClass, file, line, claim, status })),
     });
     if (args.includes('--inline-personas')) output.personas = loadPersonas();
+    // Normally reviewers get disposable worktrees. --cwd pins them to a folder instead,
+    // for hosts where the session isn't running in this repo.
+    if (args.includes('--cwd')) output.cwd = resolve(option(args, '--cwd')).replaceAll('\\', '/');
     if (output.intent) ledger.intent = output.intent;
     if (output.outOfScope) ledger.outOfScope = output.outOfScope;
     saveLedger(ledger);

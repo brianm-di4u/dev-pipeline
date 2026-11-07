@@ -73,6 +73,15 @@ See [sandbox-results.md](sandbox-results.md), from `tests/e2e/sandbox.mjs` again
 
 `tests/e2e/packs.mjs` scaffolds each pack and runs its real verification, including a real WASM build, a real Tauri build, Playwright browsers, and `cargo deny`.
 
+The template repo's own CI runs them on Ubuntu, Windows, and macOS runners, along with `actionlint` on every workflow.
+
 ### Council quality
 
 See [reviewer-baseline.md](reviewer-baseline.md).
+
+### Not verified yet
+
+- **A fresh Claude Code session in a scaffolded project.** The build session started before any seat files existed, so it ran the council with inline personas rather than registered agents, and without the project's hooks. A nested `claude -p` wasn't logged in. So these still need one real run: Claude Code loading `.claude/agents` and `.claude/skills`, the guard hook firing on real tool calls, and `onFailure: "block"` behaving as documented. The hook itself is tested directly, and the settings file is checked by a test.
+- **The restricted agent token.** Only the owner can create it. `tests/e2e/agent-token.mjs` is ready to run once it exists.
+- **Real fork PRs.** One account can't open one, so the external-author path has unit tests only.
+- **Android and iOS builds.** This machine has no JDK or Xcode. Windows and macOS Tauri builds are verified.

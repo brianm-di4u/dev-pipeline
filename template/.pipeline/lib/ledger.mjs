@@ -167,7 +167,9 @@ export function recordRound(ledger, { mode, round, hash, sha, diffLines, result 
   const maxNits = result.maxNits ?? 5;
   const droppedNits = [];
 
-  const ordered = [...(result.findings ?? [])].sort(
+  // An incomplete round is rerun, so its findings arrive with the rerun.
+  const incomplete = (result.missing ?? []).length > 0;
+  const ordered = [...(incomplete ? [] : (result.findings ?? []))].sort(
     (a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity),
   );
   for (const finding of ordered) {

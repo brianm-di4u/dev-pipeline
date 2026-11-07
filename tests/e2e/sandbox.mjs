@@ -697,10 +697,12 @@ async function setVisibility(visibility) {
       cwd: dir,
       encoding: 'utf8',
     });
-    if (result.status === 0) return;
+    if (result.status === 0) break;
     if (Date.now() > deadline) throw new Error(`Could not set ${visibility}: ${result.stderr}`);
     await sleep(15000);
   }
+  // Git access is refused for a while after the change, too.
+  await waitFor('git access after the visibility change', () => spawnSync('git', ['ls-remote', 'origin', 'main'], { cwd: dir }).status === 0);
 }
 
 await scenario('P1', 'Private mode: CI stays off, the local gate still blocks, and doctor says advisory', async () => {
