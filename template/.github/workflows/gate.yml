@@ -25,7 +25,8 @@ concurrency:
 
 jobs:
   evaluate:
-    if: ${{ !github.event.repository.private && (github.event_name != 'issue_comment' || github.event.issue.pull_request) }}
+    # Bot comments can't approve anything, so they don't need a run.
+    if: ${{ !github.event.repository.private && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && github.event.comment.user.type != 'Bot')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
