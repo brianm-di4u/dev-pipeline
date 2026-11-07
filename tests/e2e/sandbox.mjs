@@ -736,8 +736,10 @@ await scenario('P1', 'Private mode: CI stays off, the local gate still blocks, a
     expect(hook.status !== 0 && /Blocked/.test(hook.stderr), `the pre-push hook did not block: ${hook.stderr}`);
     return 'advisory reported; CI off; local gate correct; hook blocks';
   } finally {
-    await setVisibility('public');
-    execFileSync('node', [cli, 'protect', '--repo', repo], { cwd: dir, encoding: 'utf8' });
+    // Always restore the sandbox, without hiding the scenario's own result.
+    await setVisibility('public').catch((error) => console.error(error.message));
+    const restored = spawnSync('node', [cli, 'protect', '--repo', repo], { cwd: dir, encoding: 'utf8' });
+    if (restored.status !== 0) console.error(`Could not restore protection: ${restored.stdout}`);
   }
 });
 

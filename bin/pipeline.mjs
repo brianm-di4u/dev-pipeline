@@ -386,7 +386,12 @@ async function protect({ flags }) {
 
   let failed = 0;
   for (const [name, step] of steps) {
-    const result = step();
+    // GitHub briefly refuses settings changes after a repo changes visibility.
+    let result = step();
+    for (let attempt = 0; !result.ok && attempt < 6 && name !== 'CodeQL default setup'; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 15000));
+      result = step();
+    }
     console.log(`${result.ok ? 'ok    ' : 'FAILED'} ${name}`);
     if (!result.ok) {
       // CodeQL can't be set up until the repo has a language it supports.
