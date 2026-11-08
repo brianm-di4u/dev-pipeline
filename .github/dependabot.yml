@@ -1,0 +1,29 @@
+# Keeps this repo's own CI pins and the starter lockfiles current, since every new project copies them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /packs/gis-workbench/overlay/.github/actions/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: npm
+    directories:
+      - /packs/node-ts/starter
+      - /packs/browser-game/overlay/shared/test-harness
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directories:
+      - /packs/web-wasm-rust/starter
+      - /packs/desktop-mobile/starter/src-tauri
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
