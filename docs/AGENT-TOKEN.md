@@ -34,19 +34,12 @@ Leave everything else at **No access**. In particular:
 
 ## Give it to agents
 
-In your own terminal, store it in a separate GitHub CLI profile, so it doesn't replace your own login:
-
-```powershell
-$env:GH_CONFIG_DIR = "$HOME\.config\gh-agent"
-gh auth login --with-token
-```
-
-Paste the token, press Enter, and then press Ctrl+Z and Enter. Then make it the default for agent sessions by adding this to `~/.claude/settings.json`. The `GIT_CONFIG` lines matter: on Windows, `git push` otherwise uses your own login from Git Credential Manager, whatever `gh` is set to.
+Give agent sessions the token through `GH_TOKEN`. Open `~/.claude/settings.json` in your own editor, not through an agent, and add this, pasting the token in place of `<token>`:
 
 ```json
 {
   "env": {
-    "GH_CONFIG_DIR": "C:\\Users\\<you>\\.config\\gh-agent",
+    "GH_TOKEN": "<token>",
     "GIT_CONFIG_COUNT": "2",
     "GIT_CONFIG_KEY_0": "credential.helper",
     "GIT_CONFIG_VALUE_0": "",
@@ -56,13 +49,20 @@ Paste the token, press Enter, and then press Ctrl+Z and Enter. Then make it the 
 }
 ```
 
+`gh` reads `GH_TOKEN` ahead of any stored login, so agent sessions use the agent token and your own terminal, which doesn't set it, keeps your login. The `GIT_CONFIG` lines matter: on Windows, `git push` otherwise uses your own login from Git Credential Manager, whatever `gh` is set to. With them, git asks `gh`, and `gh` answers with `GH_TOKEN`.
+
+The token sits in that file in plain text. Keep the file out of any repository.
+
+**Don't store the agent token with `gh auth login`, even in a separate `GH_CONFIG_DIR` profile.** When both tokens are for the same account, it doesn't work. `gh` keeps tokens in the system keyring, keyed by host and account, not by profile, so logging in the agent token overwrites your own keyring login. And `gh` reads the keyring ahead of the profile's `hosts.yml`, so the profile doesn't isolate anything. If you already tried it, run `gh auth login` again from your own terminal to put your login back.
+
 Confirm it took effect from a Claude Code session in one of your projects:
 
 ```bash
+gh auth status
 node "C:\Development Pipeline\bin\pipeline.mjs" doctor
 ```
 
-The `Agent token` line should now say `ok`.
+`gh auth status` should show the active account as `(GH_TOKEN)` with a `github_pat_` token, and your own `gho_` login in the keyring as inactive. The doctor's `Agent token` line should say `ok`.
 
 To prove the limits hold, run this from the same kind of session, against a clone of a sandbox repo. It tries to turn off protection, change settings, push a workflow, and forge the gate, and it checks that normal work still functions:
 
@@ -72,7 +72,7 @@ node "C:\Development Pipeline\tests\e2e\agent-token.mjs" <sandbox-clone>
 
 ## When you need your own token
 
-Run `pipeline init`, `protect`, and `update` from your own terminal, where `GH_CONFIG_DIR` isn't set. Those three need Administration or Workflows access, which is why they're yours.
+Run `pipeline init`, `protect`, and `update` from your own terminal, where `GH_TOKEN` isn't set. Those three need Administration or Workflows access, which is why they're yours.
 
 ## What this doesn't do
 
