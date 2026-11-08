@@ -171,6 +171,44 @@ test('a protected path plans as T2, with the architect and an Opus voter', () =>
   assert.ok(next.panel.includes('opus'));
 });
 
+test('after a rebase, a diff round starts from the rebased copy of what was reviewed', () => {
+  git('checkout', '-q', '-b', 'rebased', 'main');
+  writeFileSync(join(dir, 'r.js'), 'export const r = 1;\n');
+  commit('Add r');
+  assert.equal(verify().status, 0);
+  assert.equal(plan('--intent', 'Add r').status, 'review');
+  const recorded = record({
+    findings: [{ severity: 'should', class: 'wrong value', file: 'r.js', line: 1, claim: 'Should be 2.', fix: 'Use 2.' }],
+    seats: ['council-bug-hunter'],
+    missing: [],
+  });
+  assert.equal(council('resolve', recorded.answerThese[0].id, 'fixed').status, 0);
+  const reviewed = git('rev-parse', 'HEAD');
+
+  // Main moves on, the branch is rebased, and then the fix lands.
+  git('checkout', '-q', 'main');
+  writeFileSync(join(dir, 'elsewhere.js'), 'export const e = 1;\n');
+  commit('Someone else');
+  git('push', '-q', 'origin', 'main');
+  git('checkout', '-q', 'rebased');
+  git('rebase', '-q', 'main');
+  const rebasedCopy = git('rev-parse', 'HEAD');
+  writeFileSync(join(dir, 'r.js'), 'export const r = 2;\n');
+  commit('Fix r');
+  assert.equal(verify().status, 0);
+
+  const next = plan();
+  assert.equal(next.mode, 'diff');
+  assert.notEqual(next.lastReviewedSha, reviewed, 'the pre-rebase commit would pull in main');
+  assert.equal(next.lastReviewedSha, rebasedCopy);
+});
+
+test('--decision takes an issue number', () => {
+  const bad = council('plan', '--decision', 'soon');
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /issue number/);
+});
+
 test('inline personas carry the same prompts and models', () => {
   const next = plan('--inline-personas');
   assert.equal(next.personas['council-security-auditor'].model, 'opus');

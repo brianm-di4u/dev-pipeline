@@ -2,6 +2,7 @@
 // Council bookkeeping for one branch. The council skill drives this.
 //
 //   council.mjs plan --intent "..." [--out-of-scope "..."]   What happens next, as JSON
+//                    [--decision <issue>]                    A decision record citing that issue
 //   council.mjs record <result.json>                         Record a round's result
 //   council.mjs resolve <id> <fixed|wrong|intentional|wont-matter|deferred> ["reason"]
 //   council.mjs accept-growth "reason"                       Accept justified diff growth
@@ -9,10 +10,11 @@
 //   council.mjs verdict                                      Print the verdict block for the PR body
 //
 // The ledger lives in .pipeline/runs/, which is gitignored.
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseConfig } from './lib/config.mjs';
-import { renderVerdict } from './lib/contract.mjs';
+import { findDecision, renderVerdict } from './lib/contract.mjs';
 import { changeSet, git, tryGit } from './lib/git.mjs';
 import {
   buildVerdict,
@@ -45,6 +47,32 @@ function saveLedger(ledger) {
   writeFileSync(ledgerPath(), `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
+// The gate puts a decision record at T0 when the PR body cites an issue carrying the admin's
+// /decide. The body doesn't exist yet when the council plans, so `plan --decision <issue>` names
+// the issue, and it is checked the same way here.
+function decided(issues, admins) {
+  if (issues.length === 0) return false;
+  return issues.every((issue) => {
+    const pages = JSON.parse(
+      execFileSync('gh', ['api', '--paginate', '--slurp', `repos/{owner}/{repo}/issues/${issue}/comments?per_page=100`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    );
+    return findDecision(pages.flat(), admins) !== null;
+  });
+}
+
+// After a rebase the reviewed commit is off this branch, and a diff from it would also show
+// everything main gained since. Use its rebased copy, found by the same change hash, or failing
+// that the merge base, so the round sees the whole change rather than someone else's.
+function reviewedBase(last, mergeBase) {
+  if (!last?.sha) return null;
+  if (tryGit(['merge-base', '--is-ancestor', last.sha, 'HEAD']) !== null) return last.sha;
+  const commits = (tryGit(['rev-list', `${mergeBase}..HEAD`]) ?? '').split('\n').filter(Boolean);
+  return commits.find((sha) => changeSet(BASE, sha).hash === last.hash) ?? mergeBase;
+}
+
 function context() {
   const config = parseConfig(readFileSync('pipeline.config.json', 'utf8'));
   const { mergeBase, changes, hash } = changeSet(BASE, 'HEAD');
@@ -53,6 +81,7 @@ function context() {
     config,
     author: config.admins[0],
     scriptsChangedIn: scriptsChanged(changes, mergeBase, 'HEAD'),
+    adrCited: decided(loadLedger().decisions ?? [], config.admins),
   });
   const shortstat = tryGit(['diff', '--shortstat', mergeBase, 'HEAD']) ?? '';
   const diffLines = [...shortstat.matchAll(/(\d+) (?:insertion|deletion)/g)].reduce((sum, m) => sum + Number(m[1]), 0);
@@ -67,6 +96,11 @@ function evidence(hash) {
 }
 
 function plan(args) {
+  const cited = args.flatMap((arg, i) => (args[i - 1] === '--decision' ? [arg.replace(/^#/, '')] : []));
+  if (cited.length > 0) {
+    if (!cited.every((issue) => /^\d+$/.test(issue))) throw new Error('--decision takes an issue number.');
+    saveLedger({ ...loadLedger(), decisions: cited });
+  }
   const ctx = context();
   const ledger = loadLedger();
   const tier = ledger.raise ? Math.max(ctx.tier, 2) : ctx.tier;
@@ -95,7 +129,7 @@ function plan(args) {
       seats: step.mode === 'confirm' ? [] : selection.seats,
       head: git(['rev-parse', 'HEAD']).trim(),
       mergeBase: ctx.mergeBase,
-      lastReviewedSha: last?.sha ?? null,
+      lastReviewedSha: reviewedBase(last, ctx.mergeBase),
       diffLines: ctx.diffLines,
       evidenceDir: resolve(proof.dir).replaceAll('\\', '/'),
       maxNits: ctx.config.council.maxNits ?? 5,

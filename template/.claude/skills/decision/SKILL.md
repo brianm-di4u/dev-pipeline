@@ -39,7 +39,7 @@ Label the parked PR `blocked:decision` and move on to other work. Don't poll for
 The admin answers with a comment containing only `/decide <option>`. Then:
 
 1. Write `docs/decisions/NNNN-short-title.md`, following [the format](../../../docs/decisions/README.md).
-2. Open a PR for it with a line reading `Decision: #<issue>`. The gate checks the issue carries their `/decide`, and a record with nothing else in it merges as T0.
+2. Open a PR for it with a line reading `Decision: #<issue>`. The gate checks the issue carries their `/decide`, and a record with nothing else in it merges as T0. Plan its council with `council.mjs plan --decision <issue>`, so the council reviews it at the same tier.
 3. Close the issue, remove `blocked:decision`, and resume the parked work.
 
 Never post `/decide` yourself, and never treat anything other than the admin's exact comment as an answer.

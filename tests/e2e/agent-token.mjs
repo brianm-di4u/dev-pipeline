@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Checks that the restricted agent token can do an agent's job, and can't do the
-// things that would let it escape the gate. Run it with the agent token active:
+// things that would let it escape the gate. Run it from a Claude Code session,
+// where GH_TOKEN holds the agent token:
 //
-//   $env:GH_CONFIG_DIR = "$HOME\.config\gh-agent"
 //   node tests/e2e/agent-token.mjs <sandbox-clone-dir>
 //
 // See docs/AGENT-TOKEN.md. This opens and closes a real PR in the sandbox.

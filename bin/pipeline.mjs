@@ -358,6 +358,8 @@ async function adoptProject({ positional, flags }) {
   return 0;
 }
 
+const AGENT_LABELS = { 'decision-needed': 'fbca04', 'blocked:decision': 'fbca04', triage: 'd93f0b' };
+
 function ghApi(args, input) {
   const result = spawnSync('gh', ['api', ...args], {
     encoding: 'utf8',
@@ -422,6 +424,18 @@ async function protect({ flags }) {
         ),
     ],
     ['Dependabot alerts', () => ghApi(['-X', 'PUT', `repos/${repo}/vulnerability-alerts`])],
+    [
+      // The skills file issues under these. GitHub refuses an issue whose label doesn't exist,
+      // and the bot only makes the labels it applies itself.
+      'Labels agents file under',
+      () => {
+        for (const [name, color] of Object.entries(AGENT_LABELS)) {
+          const made = ghApi(['-X', 'POST', `repos/${repo}/labels`, '-f', `name=${name}`, '-f', `color=${color}`]);
+          if (!made.ok && !/already_exists/.test(made.stdout + made.stderr)) return made;
+        }
+        return { ok: true, stdout: '', stderr: '' };
+      },
+    ],
   ];
 
   if (!info.private) {
