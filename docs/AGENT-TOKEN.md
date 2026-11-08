@@ -12,10 +12,11 @@ Agents share your GitHub account, but they shouldn't hold your full token. With 
 | Pull requests | Read and write | Open and update PRs |
 | Issues | Read and write | The queue and decision requests |
 | Actions | Read | See CI results |
-| Checks | Read | See the gate |
 | Commit statuses | Read | See statuses |
 | Administration | **Read only** | `doctor` can read protection. It can't change it |
 | Metadata | Read | Required |
+
+Fine-grained tokens have no Checks permission. Agents only read the gate's check run, which on a public repo needs none.
 
 Leave everything else at **No access**. In particular:
 
