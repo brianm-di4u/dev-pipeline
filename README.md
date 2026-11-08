@@ -96,3 +96,7 @@ npm test
 ```
 
 `tests/e2e/sandbox.mjs` attacks a real public GitHub repo, and `tests/e2e/packs.mjs` builds every pack for real.
+
+## License
+
+MIT, in [LICENSE](LICENSE). Parts adapted from tstack keep their own MIT notice in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Report security problems privately, as [SECURITY.md](SECURITY.md) describes.

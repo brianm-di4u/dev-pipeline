@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Drop-in template for autonomous AI software development: agents build, a human decides.",
   "bin": { "pipeline": "bin/pipeline.mjs" },
+  "license": "MIT",
   "engines": { "node": ">=22" },
   "scripts": { "test": "node --test --test-reporter=spec tests/*.test.mjs" }
 }
