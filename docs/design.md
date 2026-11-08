@@ -81,7 +81,7 @@ See [reviewer-baseline.md](reviewer-baseline.md).
 
 ### Not verified yet
 
-- **A fresh Claude Code session in a scaffolded project.** The build session started before any seat files existed, so it ran the council with inline personas rather than registered agents, and without the project's hooks. A nested `claude -p` wasn't logged in. So these still need one real run: Claude Code loading `.claude/agents` and `.claude/skills`, the guard hook firing on real tool calls, and `onFailure: "block"` behaving as documented. The hook itself is tested directly, and the settings file is checked by a test.
+- **`onFailure: "block"` when the guard hook itself fails.** A fresh session in an adopted project (GIS Workbench, November 7–8, 2026) loaded `.claude/agents` and `.claude/skills`, ran council rounds with the registered seats, and the guard blocked real `--admin` and `--no-verify` calls on Bash and PowerShell. A hook that crashes or times out hasn't been seen yet. The same run took every flow in [sandbox-results.md](sandbox-results.md) through an adopted project with a real test suite: T0 auto-merge, T1 and T2 approvals and a voided approval, a decision record, a change that failed only on main and its `Revert-of` revert, and a draft release.
 - **The restricted agent token.** Only the owner can create it. `tests/e2e/agent-token.mjs` is ready to run once it exists.
 - **Real fork PRs.** One account can't open one, so the external-author path has unit tests only.
 - **Android and iOS builds.** This machine has no JDK or Xcode. Windows and macOS Tauri builds are verified.
