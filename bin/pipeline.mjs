@@ -583,18 +583,38 @@ async function doctor({ flags }) {
     add('warn', 'GitHub', 'no remote repo found');
   }
 
-  const scopes = spawnSync('gh', ['api', '-i', 'user'], { encoding: 'utf8' }).stdout ?? '';
-  const classic = /^x-oauth-scopes:\s*(.*)$/im.exec(scopes)?.[1]?.trim();
-  if (classic && /\brepo\b/.test(classic)) {
-    add('warn', 'Agent token', `gh holds a broad token (${classic}). Give agents the restricted token: see docs/AGENT-TOKEN.md in dev-pipeline.`);
-  } else {
-    add('ok', 'Agent token', 'gh is not using a broad classic or OAuth token');
-  }
+  const token = tokenCheck(spawnSync('gh', ['api', '-i', 'user'], { encoding: 'utf8' }).stdout ?? '', config);
+  add(token.level, token.name, token.detail);
 
   const mark = { ok: 'ok   ', warn: 'warn ', fail: 'FAIL ' };
   for (const { level, name, detail } of results) console.log(`${mark[level]} ${name}${detail ? `: ${detail}` : ''}`);
   console.log(`\nEnforcement level: ${enforcement}`);
   return results.some((r) => r.level === 'fail') ? 1 : 0;
+}
+
+// What `gh api -i user` says about the token this session holds. A delegate is its
+// own account on a repo it's a collaborator on, where fine-grained tokens don't
+// work, so a classic token is expected there.
+export function tokenCheck(response, config) {
+  const classic = /^x-oauth-scopes:\s*(.*)$/im.exec(response)?.[1]?.trim();
+  const login = /"login"\s*:\s*"([^"]+)"/.exec(response)?.[1] ?? null;
+  const delegates = Array.isArray(config?.delegates) ? config.delegates : [];
+  const delegate = login && delegates.find((entry) => typeof entry?.login === 'string' && entry.login.toLowerCase() === login.toLowerCase());
+  if (delegate && !(config.admins ?? []).some((admin) => admin.toLowerCase() === login.toLowerCase())) {
+    return {
+      level: 'ok',
+      name: 'Delegate token',
+      detail: `${login} is a delegate in pipeline.config.json, so a classic token is expected (scopes: ${classic || 'none reported'}). It should have only public_repo and workflow.`,
+    };
+  }
+  if (classic && /\brepo\b/.test(classic)) {
+    return {
+      level: 'warn',
+      name: 'Agent token',
+      detail: `gh holds a broad token (${classic}). Give agents the restricted token: see docs/AGENT-TOKEN.md in dev-pipeline.`,
+    };
+  }
+  return { level: 'ok', name: 'Agent token', detail: 'gh is not using a broad classic or OAuth token' };
 }
 
 // Updates managed files in the current project. A file changed since the last

@@ -74,6 +74,26 @@ node "C:\Development Pipeline\tests\e2e\agent-token.mjs" <sandbox-clone>
 
 Run `pipeline init`, `protect`, and `update` from your own terminal, where `GH_TOKEN` isn't set. Those three need Administration or Workflows access, which is why they're yours.
 
+## A delegate's token
+
+A delegate (`delegates` in `pipeline.config.json`) is a second GitHub account that may post some of the approval commands. Its session must act as that account, so it gets a token of its own, in its own clone, and never your agent token.
+
+1. **Create the account** with its own email and two-factor authentication. Invite it as a collaborator on the target repo and on the sandbox repo used for `tests/e2e/delegate.mjs`, and nothing else. Accept both invitations as the delegate.
+2. **Create a classic token** on the delegate account, at [github.com/settings/tokens/new](https://github.com/settings/tokens/new), with only the `public_repo` and `workflow` scopes. Fine-grained tokens don't work on a repo the account is only a collaborator on, which is why it's classic. `workflow` lets the delegate relay a workflow branch an agent can't push. That scope can also forge the gate, which [design.md](design.md) lists as an accepted risk.
+3. **Clone the repo for the delegate,** for example to `C:\GIS Workbench\gwb-garden`, and set that clone's git identity to the delegate account.
+4. **Run the setup script from your own terminal,** not from an agent:
+
+   ```powershell
+   pwsh -File "C:\Development Pipeline\tools\setup-delegate.ps1" -Clone "C:\GIS Workbench\gwb-garden"
+   ```
+
+   It prompts for the token without echoing it, shows which account and scopes it belongs to, and asks before writing. It writes the clone's `.claude/settings.local.json` with `GH_TOKEN`, the same `GIT_CONFIG` lines as above, and a `model` key (`-Model` changes it). It then adds that file to the clone's `.git/info/exclude`. It never prints the token.
+5. **Check it.** From your own terminal, `git -C <clone> check-ignore -v .claude/settings.local.json` should name `.git/info/exclude`. Agent sessions can't run that one, because the guard denies any command that names the file. Then open the clone in Claude Code once, accept the trust prompt, and in that session `gh api user --jq .login` should print the delegate's login. `pipeline doctor` reports the classic token as expected for a delegate.
+
+The guard lets a session post `/approve`, `/decide`, or `/rearm` only when `gh api user` names a delegate in the default branch's config, and only the commands its grant covers. If the local settings' `GH_TOKEN` doesn't reach the hook, `gh` falls back to your keyring login, which isn't a delegate, so the guard denies. That is the safe failure.
+
+The token sits in plain text in that file, which any process running as your Windows user can read. The template's settings deny agent sessions a `Read` of `//**/.claude/settings.local.json`, which matches that file anywhere on the machine, including a sibling clone. Claude Code applies a `Read` deny to Grep, Glob, and the shell commands it recognizes, such as `cat`, on a best-effort basis, and the guard denies any shell command that names the file. Neither stops a script that reads it indirectly. Moving the delegate to its own Windows user is the stronger fix.
+
 ## What this doesn't do
 
 Your full token still sits in Windows Credential Manager on the same machine. The guard hook blocks the obvious ways of reading it, but it's a pattern match, not a wall. And the agent token can still post a comment under your login, so GitHub can't tell who wrote an `/approve`. The immediate @mention and the digest make a rogue approval visible, but they don't prevent one. See [design.md](design.md) for the options if you ever want more.

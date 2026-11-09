@@ -17,13 +17,19 @@ const DENIED_TOOLS = [
   [/^mcp__claude-in-chrome__/, "acts in the owner's signed-in browser, outside this guard"],
 ];
 
+// settings.local.json holds a delegate's token. See docs/AGENT-TOKEN.md in dev-pipeline.
 const CREDENTIAL_PATTERN =
-  /\.credentials\.json|[\\/]\.ssh[\\/]|hosts\.yml|\.netrc|[\\/]\.aws[\\/]credentials|\bcmdkey\b|\bvaultcmd\b|credentialmanager|git\s+credential\s+fill|\b(GH|GITHUB)_TOKEN\b/i;
+  /\.credentials\.json|[\\/]\.ssh[\\/]|hosts\.yml|\.netrc|[\\/]\.aws[\\/]credentials|\bcmdkey\b|\bvaultcmd\b|credentialmanager|git\s+credential\s+fill|\b(GH|GITHUB)_TOKEN\b|settings\.local\.json/i;
 
 const PROTECTED_API =
-  /(^|\/)(branches\/[^/\s]+\/protection|rulesets|collaborators|keys|hooks|actions\/secrets|actions\/variables|actions\/permissions|environments|check-runs|statuses|vulnerability-alerts|code-scanning\/default-setup)\b/i;
+  /(^|\/)(branches\/[^/\s]+\/protection|rulesets|collaborators|keys|hooks|actions\/secrets|actions\/variables|actions\/permissions|environments|check-runs|statuses|vulnerability-alerts|code-scanning\/default-setup|releases|actions\/workflows\/[^/\s]*release[^/\s]*\/dispatches)\b/i;
 
 const COMMAND_WORD = /(^|[\s"'=`])\/(approve|decide|rearm)\b/;
+const COMMAND_WORDS = /(?:^|[\s"'=`])\/(approve|decide|rearm)\b/g;
+
+const RELEASE_WRITES = ['create', 'edit', 'delete', 'delete-asset', 'upload'];
+const DECISION_CLASSES = ['design', 'determination', 'legal', 'security', 'major'];
+const LOOKUP_TIMEOUT_MS = 4000;
 
 const ADMIN_ESCAPE = /\bPIPELINE_ADMIN_PUSH\b/;
 
@@ -119,6 +125,11 @@ function checkGh(tokens, segment, context) {
       return 'Never check out an external PR: its .claude/ hooks and git hooks would run here. Review it by API diff.';
     }
   }
+  // Releases are the owner's, whoever the session is.
+  if (group === 'release' && RELEASE_WRITES.includes(action)) return `gh release ${action} is reserved for the owner.`;
+  if (group === 'workflow' && action === 'run' && /release/i.test(tokens.slice(3).join(' '))) {
+    return 'Running the release workflow is reserved for the owner.';
+  }
 
   const posts =
     ((group === 'issue' || group === 'pr') && (action === 'comment' || action === 'review' || action === 'create' || action === 'edit')) ||
@@ -126,7 +137,10 @@ function checkGh(tokens, segment, context) {
   if (posts) {
     const text = `${segment}\n${bodyFileText(tokens, context.cwd)}`;
     if (COMMAND_WORD.test(text)) {
-      return 'Only a human posts /approve, /decide, or /rearm. Reword it, for example "the approve command".';
+      const words = [...new Set([...text.matchAll(COMMAND_WORDS)].map((match) => match[1]))];
+      if (!context.delegateMayPost(words, context.cwd)) {
+        return 'Only a human posts /approve, /decide, or /rearm. Reword it, for example "the approve command".';
+      }
     }
   }
 
@@ -146,6 +160,7 @@ export function checkCommand(command, context = {}) {
     cwd: process.cwd(),
     currentBranch,
     isOwnPr: defaultIsOwnPr,
+    delegateMayPost: defaultDelegateMayPost,
     ...context,
   };
   if (CREDENTIAL_PATTERN.test(command)) return 'This touches credentials, which agents must not read.';
@@ -167,6 +182,51 @@ export function checkCommand(command, context = {}) {
     if (reason) return reason;
   }
   return null;
+}
+
+const sameLogin = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+
+// Whether `login`'s grant in `config` covers every command word. It mirrors
+// .pipeline/lib/authority.mjs, so the hook needs nothing outside this file: an
+// entry the gate would drop grants nothing here either.
+export function grantCovers(config, login, words) {
+  const admins = Array.isArray(config?.admins) ? config.admins : [];
+  if (!login || admins.some((admin) => sameLogin(admin, login))) return false;
+  const adminOnly = config.tiers?.adminOnlyPaths;
+  if (adminOnly !== undefined && !(Array.isArray(adminOnly) && adminOnly.every((p) => typeof p === 'string'))) return false;
+  const grant = (Array.isArray(config?.delegates) ? config.delegates : []).find((entry) => sameLogin(entry?.login, login));
+  if (!grant) return false;
+  for (const flag of ['approve', 'approveExternal', 'rearm', 'direct']) {
+    if (flag in grant && typeof grant[flag] !== 'boolean') return false;
+  }
+  const decide = grant.decide ?? [];
+  if (!Array.isArray(decide) || !decide.every((cls) => DECISION_CLASSES.includes(cls))) return false;
+  return words.every((word) => (word === 'approve' ? grant.approve === true : word === 'decide' ? decide.length > 0 : grant.rearm === true));
+}
+
+const lookup = (args, cwd) =>
+  execFileSync('gh', args, { cwd, encoding: 'utf8', timeout: LOOKUP_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+
+// A delegate's own session may post the commands its grant covers. Who the
+// session is comes from GitHub (`gh api user`), and the grant from the default
+// branch's config, read through the API, so editing the working tree changes
+// nothing. Any error or timeout denies. A repo with no delegates in its config
+// is never looked up, so it denies at once, as it always has.
+function defaultDelegateMayPost(words, cwd) {
+  try {
+    const local = JSON.parse(readFileSync(`${cwd ?? process.cwd()}/pipeline.config.json`, 'utf8'));
+    if (!Array.isArray(local.delegates) || local.delegates.length === 0) return false;
+    const login = lookup(['api', 'user', '--jq', '.login'], cwd);
+    const repo = JSON.parse(lookup(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef'], cwd));
+    const content = lookup(
+      ['api', `repos/${repo.nameWithOwner}/contents/pipeline.config.json?ref=${repo.defaultBranchRef.name}`, '--jq', '.content'],
+      cwd,
+    );
+    const config = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
+    return grantCovers(config, login, words);
+  } catch {
+    return false;
+  }
 }
 
 function defaultIsOwnPr(number) {
