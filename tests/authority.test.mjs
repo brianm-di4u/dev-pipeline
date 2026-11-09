@@ -171,7 +171,8 @@ test('findApproval, findDecision and hasRearm with a bare admins list match the 
       for (const updated of ['2026-11-09T10:00:00Z', 'later']) {
         const list = [comment(body, user.login, { user, updated_at: updated })];
         assert.equal(findApproval(list, ['owner'], hash)?.comment ?? null, before.findApproval(list, ['owner'], hash));
-        assert.deepEqual(findDecision(list, ['owner']), before.findDecision(list, ['owner']));
+        const decision = findDecision(list, ['owner']);
+        assert.deepEqual(decision && { option: decision.option, comment: decision.comment }, before.findDecision(list, ['owner']));
         assert.equal(hasRearm(list, ['owner']), before.hasRearm(list, ['owner']));
         // A config with no delegates behaves like the bare list.
         assert.equal(findApproval(list, base, hash)?.comment ?? null, before.findApproval(list, ['owner'], hash));

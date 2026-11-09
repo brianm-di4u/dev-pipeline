@@ -47,10 +47,11 @@ function saveLedger(ledger) {
   writeFileSync(ledgerPath(), `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
-// The gate puts a decision record at T0 when the PR body cites an issue carrying the admin's
-// /decide. The body doesn't exist yet when the council plans, so `plan --decision <issue>` names
-// the issue, and it is checked the same way here.
-function decided(issues, admins) {
+// The gate puts a decision record at T0 when the PR body cites an issue carrying a /decide that
+// counts: an admin's, or a delegate's within its grant. The body doesn't exist yet when the council
+// plans, so `plan --decision <issue>` names the issue, and it is checked the same way here, except
+// for delegate suspension, which this can't see. The gate checks that again, and it is the authority.
+function decided(issues, config) {
   if (issues.length === 0) return false;
   return issues.every((issue) => {
     const pages = JSON.parse(
@@ -59,7 +60,7 @@ function decided(issues, admins) {
         stdio: ['ignore', 'pipe', 'pipe'],
       }),
     );
-    return findDecision(pages.flat(), admins) !== null;
+    return findDecision(pages.flat(), config, { ignoreSuspension: true }) !== null;
   });
 }
 
@@ -81,7 +82,7 @@ function context() {
     config,
     author: config.admins[0],
     scriptsChangedIn: scriptsChanged(changes, mergeBase, 'HEAD'),
-    adrCited: decided(loadLedger().decisions ?? [], config.admins),
+    adrCited: decided(loadLedger().decisions ?? [], config),
   });
   const shortstat = tryGit(['diff', '--shortstat', mergeBase, 'HEAD']) ?? '';
   const diffLines = [...shortstat.matchAll(/(\d+) (?:insertion|deletion)/g)].reduce((sum, m) => sum + Number(m[1]), 0);

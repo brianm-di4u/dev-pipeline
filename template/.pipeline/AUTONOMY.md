@@ -18,10 +18,10 @@ Default to `full-send` for every change. Use `full-stop` when asked to leave a P
 Open a `decision-needed` issue using the Decision template, park that work, and carry on with anything else. First check `docs/decisions/`, and don't re-ask something already decided.
 
 - **Design:** product or UX direction, architecture that sets a pattern, a new framework, hard-to-change data models.
-- **Determination:** go/no-go, scope outside the PRD, first public release, retirement.
+- **Determination:** operational go/no-go inside the PRD's scope, such as whether to ship, hold, or drop a feature as built.
 - **Legal:** project license, third-party code or assets off the allowlist in `THIRD_PARTY.md`, personal data, trademarks, real people.
 - **Security:** auth and permission models, exposure changes, CI permissions, findings with a real trade-off. Fix clear-cut vulnerabilities yourself.
-- **Major:** spending money, irreversible data operations, domains and store submissions, anything outside this repo, and changes to this policy.
+- **Major:** public releases, scope outside the PRD, retirement, changes to this policy, spending money, irreversible data operations, domains and store submissions, and anything outside this repo.
 
 Exploitable security detail never goes in a public issue. Put it in a draft repository security advisory, and have the issue only point to it.
 

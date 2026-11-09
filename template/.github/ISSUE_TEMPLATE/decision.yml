@@ -7,6 +7,9 @@ body:
     id: class
     attributes:
       label: Class
+      description: >-
+        As .pipeline/AUTONOMY.md defines them. Determination is operational go/no-go inside the
+        PRD's scope. Releases, scope outside the PRD, retirement, policy and money are major.
       options: [design, determination, legal, security, major]
     validations:
       required: true

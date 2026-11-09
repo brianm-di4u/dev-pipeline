@@ -48,6 +48,10 @@ What this template does, where each capability came from, what's been proven, an
 
 **A bot @mention is the only notification.** GitHub doesn't notify you of your own account's actions, and agents act as you.
 
+**Delegates are optional.** A `delegates` list in `pipeline.config.json` names other GitHub accounts and the commands each may post: `approve`, `decide` for some decision classes, `rearm`, and `direct` for issues that start work. With no list, nothing changes, and tests compare the gate against a frozen copy of the code from before the feature. A delegate's command counts only within its grant. It can't approve a change to an admin-only path (a built-in floor covering the files that define its own authority, plus `tiers.adminOnlyPaths`), a symlink, changed `package.json` scripts, an outside author's PR, or a PR it opened, committed to, pushed to, or edited.
+
+**The bot records a decision's class.** When `decision-needed` lands, the bot posts the class it read from the issue body in a hidden marker, and the earliest unedited marker is the record, so editing the body later can't lower it. No class, an ambiguous one, or an edited bot comment means only an admin can decide. A delegate's `/decide` within its grant also lets the decision record merge at T0, as an admin's does. That is intended: the record writes down a decision already made within the grant.
+
 **No AI and no secrets in CI.** The council runs locally on a subscription, so a public repo's CI has nothing to steal.
 
 ## Risks the owner is accepting

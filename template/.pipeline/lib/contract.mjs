@@ -1,5 +1,5 @@
 // The PR contract: what a PR body must say, and the council verdict it carries.
-import { sameLogin, toAuthority } from './authority.mjs';
+import { DECISION_CLASSES, sameLogin, toAuthority } from './authority.mjs';
 
 export const REQUIRED_SECTIONS = ['Testing', 'Risk', 'How to revert'];
 
@@ -165,15 +165,87 @@ export function delegateRefusals(comments, auth, hash, ctx = {}) {
     .filter((refusal) => refusal.reasons.length > 0);
 }
 
-export function findDecision(comments, auth) {
+// A decision request's class, from its body: the issue form renders
+// `### Class\n\n<class>`, and the decision skill writes `**Class:** <class>`.
+// Anything ambiguous or unknown is null: unclassified, so only an admin decides.
+export function parseDecisionClass(body) {
+  const text = (body ?? '').replace(/\r\n?/g, '\n').replace(/<!--[\s\S]*?-->/g, '');
+  const found = new Set();
+  for (const match of text.matchAll(/^###[ \t]*Class[ \t]*\n+[ \t]*(\S[^\n]*?)[ \t]*$/gim)) found.add(match[1].toLowerCase());
+  for (const match of text.matchAll(/^[ \t]*(?:[-*][ \t]+)?\*\*Class:\*\*[ \t]*(\S[^\n]*?)[ \t]*$/gim)) {
+    found.add(match[1].toLowerCase());
+  }
+  if (found.size !== 1) return null;
+  const [cls] = found;
+  return DECISION_CLASSES.includes(cls) ? cls : null;
+}
+
+// The bot records the class when the issue is labelled, so nobody can lower it
+// later by editing the body. The earliest unedited bot marker wins. If any of the
+// bot's comments on the issue was edited, the record is untrustworthy, and the
+// issue counts as unclassified.
+const CLASS_MARKER_RE = /<!--\s*pipeline:decision-class\s+([a-z-]+)\s*-->/;
+
+export const renderClassMarker = (cls) => `<!-- pipeline:decision-class ${cls ?? 'unclassified'} -->`;
+
+export function recordedClass(comments) {
+  const bot = (comments ?? []).filter(isBotComment);
+  const markers = bot
+    .filter((comment) => CLASS_MARKER_RE.test(comment.body ?? ''))
+    .sort((a, b) => time(a.created_at) - time(b.created_at) || (a.id ?? 0) - (b.id ?? 0));
+  if (markers.length === 0) return null;
+  const cls = CLASS_MARKER_RE.exec(markers[0].body)[1];
+  const tampered = bot.some((comment) => comment.created_at !== comment.updated_at);
+  return { class: !tampered && DECISION_CLASSES.includes(cls) ? cls : null, at: markers[0].created_at };
+}
+
+const DECIDE_RE = /^\/decide ([A-Za-z0-9._-]+)$/;
+
+// Why a delegate's /decide on this issue would not count.
+export function decisionProblems(comment, auth, comments, ctx = {}) {
+  const who = toAuthority(auth);
+  const grant = who.delegateOf(comment.user?.login);
+  if (!grant) return [`${comment.user?.login} is not a delegate`];
+  const recorded = recordedClass(comments);
+  const reasons = [];
+  if (!recorded?.class) {
+    reasons.push('the bot has no class on record for this issue, so only an admin can decide it');
+  } else {
+    if (!grant.decide.includes(recorded.class)) reasons.push(`${grant.login} may not decide ${recorded.class} questions`);
+    if (!(time(recorded.at) < time(comment.created_at))) reasons.push('it was posted before the bot recorded the class');
+  }
+  // council.mjs plans offline and can't read suspension. The gate re-checks.
+  if (!ctx.ignoreSuspension) {
+    if (ctx.suspended === undefined || !Array.isArray(ctx.suspensions)) {
+      reasons.push('the delegate suspension state could not be read');
+    } else if (ctx.suspended) {
+      reasons.push('delegates are suspended');
+    } else if (inWindow(comment.created_at, ctx.suspensions)) {
+      reasons.push('it was posted while delegates were suspended');
+    }
+  }
+  return reasons;
+}
+
+// The first /decide that counts, as { option, comment, role, class }, or null. An
+// admin's always counts. A delegate's counts only for a class in its grant that
+// the bot recorded before the comment, and not while suspended.
+export function findDecision(comments, auth, ctx = {}) {
   const who = toAuthority(auth);
   for (const comment of comments) {
-    if (actorOf(comment, who) !== 'admin') continue;
-    const match = /^\/decide ([A-Za-z0-9._-]+)$/.exec((comment.body ?? '').trim());
-    if (match) return { option: match[1], comment };
+    const role = actorOf(comment, who);
+    if (!role) continue;
+    const match = DECIDE_RE.exec((comment.body ?? '').trim());
+    if (!match) continue;
+    if (role === 'admin') return { option: match[1], comment, role, class: recordedClass(comments)?.class ?? null };
+    if (decisionProblems(comment, who, comments, ctx).length === 0) {
+      return { option: match[1], comment, role, class: recordedClass(comments).class };
+    }
   }
   return null;
 }
+
+export const isDecideCommand = (comment) => DECIDE_RE.test((comment?.body ?? '').trim());
 
 export function hasRearm(comments, auth) {
   const who = toAuthority(auth);

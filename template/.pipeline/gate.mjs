@@ -83,12 +83,13 @@ async function repoState(client, repo, config, body) {
   return { mainRed: redIssues.length > 0, citesMainRed, breakerTripped };
 }
 
-async function citedDecision(client, repo, config, body) {
+// A delegate's /decide counts only with the suspension state, which `ctx` carries.
+async function citedDecision(client, repo, config, body, ctx = {}) {
   const issues = [...(body ?? '').matchAll(/^Decision:\s*#(\d+)\s*$/gim)].map((m) => m[1]);
   if (issues.length === 0) return false;
   for (const issue of issues) {
     const comments = await client.list(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
-    if (!findDecision(comments, config.admins)) return false;
+    if (!findDecision(comments, config, ctx)) return false;
   }
   return true;
 }

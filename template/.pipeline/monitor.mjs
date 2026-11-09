@@ -12,8 +12,18 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { evaluateBreaker } from './lib/breaker.mjs';
+import { authority } from './lib/authority.mjs';
 import { loadConfig } from './lib/config.mjs';
-import { findDecision, hasRearm } from './lib/contract.mjs';
+import {
+  actorOf,
+  decisionProblems,
+  findDecision,
+  hasRearm,
+  isDecideCommand,
+  parseDecisionClass,
+  recordedClass,
+  renderClassMarker,
+} from './lib/contract.mjs';
 import { buildDigest, renderDigest } from './lib/digest.mjs';
 import { tokenClient } from './lib/github.mjs';
 
@@ -105,17 +115,59 @@ async function postMerge(client, repo, config, args) {
   console.log(JSON.stringify({ result, breaker }));
 }
 
-async function issueEvent(client, repo, config) {
-  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+const ANSWER = 'Answer with a comment containing only `/decide <option>`.';
+
+// With a delegate configured, the bot records the class when the issue is first
+// labelled, and only pings the admins for a class no delegate may decide.
+async function decisionNotice(client, repo, config, auth, issue) {
+  const comments = await client.list(`/repos/${repo}/issues/${issue.number}/comments?per_page=100`);
+  const recorded = recordedClass(comments);
+  const cls = recorded ? recorded.class : parseDecisionClass(issue.body);
+  const marker = recorded ? '' : `\n\n${renderClassMarker(cls)}`;
+  const deciders = cls ? auth.delegates.filter((grant) => grant.decide.includes(cls)).map((grant) => grant.login) : [];
+  if (deciders.length > 0) {
+    return `A ${cls} decision is needed here. A delegate (${deciders.join(', ')}) or an admin can decide it. ${ANSWER}${marker}`;
+  }
+  const who = cls
+    ? `This is a ${cls} decision, so only an admin can make it.`
+    : 'Its class is missing or unclear, so only an admin can make it.';
+  return `${mentions(config)} a decision is needed here. ${who} ${ANSWER}${marker}`;
+}
+
+// The gate is the authority on whether a delegate's /decide counts. This only
+// labels the issue, and tells the delegate when it doesn't count.
+async function delegateDecision(client, repo, auth, issue, comment, ctx) {
+  const comments = await client.list(`/repos/${repo}/issues/${issue.number}/comments?per_page=100`);
+  const problems = decisionProblems(comment, auth, comments, ctx);
+  if (problems.length > 0) {
+    await client.post(`/repos/${repo}/issues/${issue.number}/comments`, {
+      body: `The decision by ${comment.user.login} doesn't count: ${problems.join('; ')}.`,
+    });
+    return;
+  }
+  const decision = findDecision(comments, auth, ctx);
+  await ensureLabel(client, repo, 'decided');
+  await client.post(`/repos/${repo}/issues/${issue.number}/labels`, { labels: ['decided'] });
+  await client.post(`/repos/${repo}/issues/${issue.number}/comments`, {
+    body: `Delegate decision by ${comment.user.login} recorded: \`${decision?.option ?? '?'}\` (${decision?.class ?? 'unclassified'}).`,
+  });
+}
+
+// `ctx` carries the delegate suspension state. Without it, a delegate's /decide
+// doesn't count.
+export async function issueEvent(client, repo, config, eventName, event, ctx = {}) {
   const issue = event.issue;
   if (!issue || issue.pull_request) return;
   const labels = (issue.labels ?? []).map((label) => label.name);
+  const auth = authority(config);
 
-  if (process.env.GITHUB_EVENT_NAME === 'issues') {
+  if (eventName === 'issues') {
     if (event.action === 'labeled' && event.label?.name === 'decision-needed') {
-      await client.post(`/repos/${repo}/issues/${issue.number}/comments`, {
-        body: `${mentions(config)} a decision is needed here. Answer with a comment containing only \`/decide <option>\`.`,
-      });
+      const body =
+        auth.delegates.length > 0
+          ? await decisionNotice(client, repo, config, auth, issue)
+          : `${mentions(config)} a decision is needed here. ${ANSWER}`;
+      await client.post(`/repos/${repo}/issues/${issue.number}/comments`, { body });
     }
     return;
   }
@@ -126,6 +178,8 @@ async function issueEvent(client, repo, config) {
   if (labels.includes('decision-needed') && findDecision([comment], config.admins)) {
     await ensureLabel(client, repo, 'decided');
     await client.post(`/repos/${repo}/issues/${issue.number}/labels`, { labels: ['decided'] });
+  } else if (labels.includes('decision-needed') && actorOf(comment, auth) === 'delegate' && isDecideCommand(comment)) {
+    await delegateDecision(client, repo, auth, issue, comment, ctx);
   }
 
   if (labels.includes('pipeline:breaker') && issue.user?.login === BOT && hasRearm([comment], config.admins)) {
@@ -192,7 +246,8 @@ export async function main() {
   const config = loadConfig();
   const commands = {
     'post-merge': () => postMerge(client, repo, config, args),
-    'issue-event': () => issueEvent(client, repo, config),
+    'issue-event': () =>
+      issueEvent(client, repo, config, process.env.GITHUB_EVENT_NAME, JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'))),
     audit: () => audit(client, repo, config),
     digest: () => digest(client, repo, config),
   };
