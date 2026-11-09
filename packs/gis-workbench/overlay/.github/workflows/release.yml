@@ -22,9 +22,13 @@ on:
 
 permissions: {}
 
+# Releases are the owner's. On a personal repo every job runs only for the owner,
+# including a re-run, so a collaborator such as a delegate account can't release.
+# An organization has no single owner login, so there this check doesn't apply.
+
 jobs:
   check:
-    if: ${{ inputs.action == 'cut' && !github.event.repository.private }}
+    if: ${{ inputs.action == 'cut' && !github.event.repository.private && (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -50,6 +54,7 @@ jobs:
 
   app:
     needs: check
+    if: ${{ (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -67,6 +72,7 @@ jobs:
 
   sidecar:
     needs: check
+    if: ${{ (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -83,6 +89,7 @@ jobs:
 
   draft:
     needs: [app, sidecar]
+    if: ${{ (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -96,7 +103,7 @@ jobs:
       - run: gh release create "$VERSION" --target "$SHA" --draft --prerelease --title "$VERSION" --notes "Draft. Assets are uploaded and checked before this is published."
 
   promote:
-    if: ${{ inputs.action == 'promote' && !github.event.repository.private }}
+    if: ${{ inputs.action == 'promote' && !github.event.repository.private && (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -15,9 +15,13 @@ on:
 
 permissions: {}
 
+# Releases are the owner's. On a personal repo every job runs only for the owner,
+# including a re-run, so a collaborator such as a delegate account can't release.
+# An organization has no single owner login, so there this check doesn't apply.
+
 jobs:
   publish:
-    if: ${{ github.event_name == 'push' && !github.event.repository.private }}
+    if: ${{ github.event_name == 'push' && !github.event.repository.private && (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -37,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   promote:
-    if: ${{ github.event_name == 'workflow_dispatch' && !github.event.repository.private }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !github.event.repository.private && (github.event.repository.owner.type == 'Organization' || (github.actor == github.repository_owner && github.triggering_actor == github.repository_owner)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
