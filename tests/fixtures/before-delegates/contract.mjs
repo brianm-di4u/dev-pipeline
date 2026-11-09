@@ -1,51 +1,8 @@
-// Frozen copy of this file as it was before delegates existed. Tests compare the
-// live code against it to prove that, with no `delegates` key, nothing changed.
-// Never edit it.
-// The PR contract: what a PR body must say, and the council verdict it carries.
-
-export const REQUIRED_SECTIONS = ['Testing', 'Risk', 'How to revert'];
-
-const stripComments = (text) => text.replace(/<!--[\s\S]*?-->/g, '');
-
-export function sectionBody(body, heading) {
-  const lines = stripComments(body ?? '').split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading}`.toLowerCase());
-  if (start === -1) return null;
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((line) => /^##\s/.test(line));
-  return (end === -1 ? rest : rest.slice(0, end)).join('\n').trim();
-}
-
-export function checkContract(body) {
-  const missing = REQUIRED_SECTIONS.filter((heading) => {
-    const content = sectionBody(body, heading);
-    return !content || /^(todo|tbd|n\/?a)\.?$/i.test(content);
-  });
-  return { ok: missing.length === 0, missing };
-}
-
-const VERDICT_RE = /<!--\s*pipeline:verdict\s*([\s\S]*?)-->/g;
-
-export function parseVerdict(body) {
-  const blocks = [...(body ?? '').matchAll(VERDICT_RE)];
-  if (blocks.length === 0) return { verdict: null, error: 'missing' };
-  try {
-    const verdict = JSON.parse(blocks.at(-1)[1]);
-    const valid =
-      typeof verdict.changeHash === 'string' &&
-      Number.isInteger(verdict.tier) &&
-      Number.isInteger(verdict.rounds) &&
-      Number.isInteger(verdict.open?.blocker) &&
-      Number.isInteger(verdict.open?.should);
-    return valid ? { verdict, error: null } : { verdict: null, error: 'malformed' };
-  } catch {
-    return { verdict: null, error: 'malformed' };
-  }
-}
-
-export function renderVerdict(verdict) {
-  return `<!-- pipeline:verdict\n${JSON.stringify(verdict)}\n-->`;
-}
+// Frozen copy of the command parsers in contract.mjs as they were before delegates
+// existed. Tests compare the live code against it to prove that, with no
+// `delegates` key, nothing changed. Never edit it. The PR contract and verdict
+// parsers didn't change, so they're re-exported rather than copied.
+export { REQUIRED_SECTIONS, checkContract, parseVerdict, renderVerdict, sectionBody } from '../../../template/.pipeline/lib/contract.mjs';
 
 // Commands count only as a comment's entire body, from an admin, never edited.
 // A comment that quotes a command therefore does nothing.
