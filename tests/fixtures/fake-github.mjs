@@ -2,7 +2,8 @@
 // and state code can be tested without the network. Every call is recorded.
 export const BOT_USER = { login: 'github-actions[bot]', type: 'Bot' };
 
-export function fakeGitHub({ issues = [], comments = {}, pulls = [], commits = {}, events = {}, checkRuns = {}, runs = {} } = {}) {
+// `routes` answers any other path exactly: { 'GET /repos/o/r/x': value, 'LIST /repos/o/r/y': [...] }.
+export function fakeGitHub({ issues = [], comments = {}, pulls = [], commits = {}, events = {}, checkRuns = {}, runs = {}, routes = {} } = {}) {
   const state = {
     issues: issues.map((issue) => ({ state: 'open', labels: [], user: BOT_USER, body: '', ...issue })),
     comments: Object.fromEntries(Object.entries(comments).map(([k, v]) => [k, [...v]])),
@@ -20,6 +21,7 @@ export function fakeGitHub({ issues = [], comments = {}, pulls = [], commits = {
     state.calls.push({ method: 'LIST', path });
     const url = new URL(path, 'https://api.github.test');
     const q = url.searchParams;
+    if (`LIST ${url.pathname}` in routes) return routes[`LIST ${url.pathname}`];
     let m;
     if ((m = /\/issues\/(\d+)\/comments$/.exec(url.pathname))) return state.comments[m[1]] ?? [];
     if ((m = /\/issues\/(\d+)\/events$/.exec(url.pathname))) return state.events[m[1]] ?? [];
@@ -78,7 +80,9 @@ export function fakeGitHub({ issues = [], comments = {}, pulls = [], commits = {
   const get = async (path) => {
     state.calls.push({ method: 'GET', path });
     const url = new URL(path, 'https://api.github.test');
+    if (`GET ${url.pathname}` in routes) return routes[`GET ${url.pathname}`];
     let m;
+    if ((m = /\/pulls\/(\d+)$/.exec(url.pathname))) return state.pulls.find((pr) => pr.number === Number(m[1])) ?? null;
     if ((m = /\/actions\/runs\/(\d+)$/.exec(url.pathname))) return state.runs[m[1]] ?? null;
     if ((m = /\/issues\/(\d+)$/.exec(url.pathname))) return state.issues.find((i) => i.number === Number(m[1])) ?? null;
     throw new Error(`fake GitHub: no get route for ${path}`);

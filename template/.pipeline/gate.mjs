@@ -195,7 +195,7 @@ function readLocalEvidence(hash, cwd = process.cwd()) {
   return evidence.ok ? 'success' : 'failure';
 }
 
-async function publish(client, repo, input, result) {
+export function checkRunBody(input, result, runId = process.env.GITHUB_RUN_ID) {
   const body = {
     name: CHECK_NAME,
     head_sha: input.pr.head,
@@ -204,7 +204,41 @@ async function publish(client, repo, input, result) {
     output: { title: result.title, summary: result.summary },
   };
   if (result.conclusion) body.conclusion = result.conclusion;
-  await client.post(`/repos/${repo}/check-runs`, body);
+  // With a delegate configured, stamp the check with this run, so post-merge can
+  // tell it from one a pushed workflow wrote. See lib/delegates.mjs.
+  if (authority(input.config).delegates.length > 0 && runId) body.external_id = String(runId);
+  return body;
+}
+
+async function publish(client, repo, input, result) {
+  await client.post(`/repos/${repo}/check-runs`, checkRunBody(input, result));
+}
+
+// Evaluate and publish again, for when state outside the PR changed: a delegate
+// suspension voids approvals that already turned checks green.
+export async function reevaluate(client, repo, numbers, cwd = process.cwd()) {
+  const results = [];
+  for (const number of numbers) {
+    const pr = await client.get(`/repos/${repo}/pulls/${number}`);
+    if (pr.state !== 'open') continue;
+    try {
+      const input = await gather({ client, repo, number, cwd });
+      const result = evaluateGate(input);
+      await publish(client, repo, input, result);
+      results.push({ number, conclusion: result.conclusion ?? result.status });
+    } catch (error) {
+      console.error(error);
+      await client.post(`/repos/${repo}/check-runs`, {
+        name: CHECK_NAME,
+        head_sha: pr.head.sha,
+        status: 'completed',
+        conclusion: 'failure',
+        output: { title: 'Gate error', summary: 'The gate could not evaluate this PR. See the workflow log.' },
+      });
+      results.push({ number, conclusion: 'failure' });
+    }
+  }
+  return results;
 }
 
 // One account can't be told apart from its agents, so every admin approval gets
