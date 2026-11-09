@@ -255,6 +255,8 @@ export function buildVerdict({ ledger, tier, hash }) {
     rounds: counted.length,
     open: { blocker: count('blocker'), should: count('should'), nit: ledger.findings.filter((f) => f.severity === 'nit').length },
     ...(ledger.raise ? { raise: ledger.raise } : {}),
+    // Self-reported by `council.mjs plan --worker <model>`, for the digest.
+    ...(ledger.worker ? { worker: { model: ledger.worker } } : {}),
     seats: [...new Set(ledger.rounds.flatMap((r) => r.seats))],
     diff: { first: ledger.rounds[0]?.diffLines ?? 0, final: last.diffLines },
     findings: ledger.findings.map((f) => ({

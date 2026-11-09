@@ -3,6 +3,7 @@
 //
 //   council.mjs plan --intent "..." [--out-of-scope "..."]   What happens next, as JSON
 //                    [--decision <issue>]                    A decision record citing that issue
+//                    [--worker <model>]                      The model that wrote the change
 //   council.mjs record <result.json>                         Record a round's result
 //   council.mjs resolve <id> <fixed|wrong|intentional|wont-matter|deferred> ["reason"]
 //   council.mjs accept-growth "reason"                       Accept justified diff growth
@@ -13,7 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { parseConfig } from './lib/config.mjs';
+import { MODEL_NAME, parseConfig } from './lib/config.mjs';
 import { findDecision, renderVerdict } from './lib/contract.mjs';
 import { changeSet, git, tryGit } from './lib/git.mjs';
 import {
@@ -101,6 +102,11 @@ function plan(args) {
   if (cited.length > 0) {
     if (!cited.every((issue) => /^\d+$/.test(issue))) throw new Error('--decision takes an issue number.');
     saveLedger({ ...loadLedger(), decisions: cited });
+  }
+  const worker = option(args, '--worker');
+  if (worker !== null) {
+    if (!MODEL_NAME.test(worker)) throw new Error('--worker takes a model name.');
+    saveLedger({ ...loadLedger(), worker });
   }
   const ctx = context();
   const ledger = loadLedger();
