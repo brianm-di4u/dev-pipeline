@@ -129,6 +129,7 @@ export function delegateBarriers(auth, login, ctx = {}) {
   const kinds = [...new Set(touches.map((touch) => TOUCH_WORDS[touch.kind]).filter(Boolean))];
   if (kinds.length > 0) reasons.push(`a delegate ${kinds.join(' and ')}`);
   if (touches.some((touch) => !TOUCH_WORDS[touch.kind])) reasons.push('the bot has marked it as touched by a delegate');
+  if (ctx.historyUnreadable) reasons.push("the gate could not read this PR's push and edit history");
   if (ctx.suspended === undefined || !Array.isArray(ctx.suspensions)) {
     reasons.push('the gate could not read the delegate suspension state');
   } else if (ctx.suspended) {

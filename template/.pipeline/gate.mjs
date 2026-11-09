@@ -89,8 +89,19 @@ export async function delegateInputs(client, repo, number, comments, { pr = null
   const labelled = events
     .filter((event) => event.event === 'labeled' && event.label?.name === TOUCHED_LABEL && event.actor?.login === BOT)
     .map((event) => ({ kind: 'label', login: null, at: event.created_at }));
-  const recorded = pr && config ? await recordedTouches(client, repo, number, pr, config) : [];
-  return { commitLogins, touches: [...touchMarkers(comments), ...labelled, ...recorded] };
+  // If GitHub's own records can't be read, a delegate's approval can't count, but
+  // the gate still runs, so an admin's approval still works.
+  let recorded = [];
+  let historyUnreadable = false;
+  if (pr && config) {
+    try {
+      recorded = await recordedTouches(client, repo, number, pr, config);
+    } catch (error) {
+      console.error(`Could not read the push and edit history of #${number}: ${error.message}`);
+      historyUnreadable = true;
+    }
+  }
+  return { commitLogins, touches: [...touchMarkers(comments), ...labelled, ...recorded], historyUnreadable };
 }
 
 const EDITS_QUERY =
@@ -317,6 +328,7 @@ export function approvalNotice(comment, input, result) {
     author: input.pr.author,
     commitLogins: input.commitLogins,
     touches: input.touches,
+    historyUnreadable: input.historyUnreadable,
     suspended: input.suspended,
     suspensions: input.suspensions,
   };

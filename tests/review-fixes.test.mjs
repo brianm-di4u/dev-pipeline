@@ -202,10 +202,14 @@ test("C14: pushes and body edits are read from GitHub's own records, after the P
   assert.deepEqual(fork.touches.map((t) => t.kind), ['body']);
 });
 
-test('C14: an unreadable edit history fails the gate run rather than passing it', async () => {
+test("C14: an unreadable history voids a delegate's approval, and leaves the gate running for an admin's", async () => {
   const pr = { created_at: at(9), head: { ref: 'x', repo: { full_name: 'o/r' } } };
   const client = fakeGitHub({ graphql: () => ({ errors: [{ message: 'no access' }] }) });
-  await assert.rejects(delegateInputs(client, 'o/r', 8, [], { pr, config: delegated() }), /edit history/);
+  const inputs = await delegateInputs(client, 'o/r', 8, [], { pr, config: delegated() });
+  assert.equal(inputs.historyUnreadable, true);
+  const ctx = { flags: { adminOnly: [], symlinks: [], scripts: [], external: false, workflows: [] }, author: 'owner', commitLogins: [], touches: [], historyUnreadable: true, suspended: false, suspensions: [] };
+  assert.ok(delegateBarriers(delegated(), 'gardener', ctx).some((r) => /push and edit history/.test(r)));
+  assert.equal(findApproval([say('/approve abcdef012345', 'owner')], delegated(), 'abcdef012345'.padEnd(64, '0'), ctx).role, 'admin');
 });
 
 test('C14: a commit with no linked GitHub user is not a barrier', async () => {
