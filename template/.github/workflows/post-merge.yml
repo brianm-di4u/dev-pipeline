@@ -47,3 +47,36 @@ jobs:
       - run: node .pipeline/monitor.mjs post-merge --result "${{ needs.verify.result }}"
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+  # Only with a delegate configured: check that the merged PR's gate result came
+  # from the pipeline, label a merge a delegate approved, and suspend delegates
+  # after bad merges, which re-runs the gate. The record job keeps its own permissions.
+  delegates:
+    needs: record
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      checks: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: delegates
+        name: Stop here unless a delegate is configured
+        run: node -e "const c = require('./pipeline.config.json'); console.log('on=' + (Array.isArray(c.delegates) && c.delegates.length > 0))" >> "$GITHUB_OUTPUT"
+      # Re-running the gate computes change hashes, which needs the history.
+      - if: ${{ steps.delegates.outputs.on == 'true' }}
+        run: git fetch --quiet --unshallow origin
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.delegates.outputs.on == 'true' }}
+        with:
+          node-version: 24
+      - if: ${{ steps.delegates.outputs.on == 'true' }}
+        run: node .pipeline/monitor.mjs delegates-post-merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
