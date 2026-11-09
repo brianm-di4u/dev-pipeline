@@ -7,7 +7,7 @@
 //   pipeline protect [--repo owner/name] [--off]
 //   pipeline doctor [--repo owner/name]
 //   pipeline update [--check]
-//   pipeline metrics [--repo owner/name]
+//   pipeline metrics [--repo owner/name] [--since YYYY-MM-DD] [--extended]
 //   pipeline packs
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -699,7 +699,14 @@ async function metrics({ flags }) {
   const bot = encodeURIComponent('github-actions[bot]');
   const botIssues = (client, name, label, state = 'open') =>
     client.list(`/repos/${name}/issues?state=${state}&labels=${encodeURIComponent(label)}&creator=${bot}&per_page=100`);
-  const data = await buildDigest({ client: cliClient(), repo, config, now: new Date(), botIssues });
+  // --since sets the start, for a baseline. --extended adds the delegate measures,
+  // such as approval wait, even before a delegate is configured.
+  let since = null;
+  if (typeof flags.since === 'string') {
+    if (Number.isNaN(Date.parse(flags.since))) throw new Error(`--since takes a date, such as 2026-11-07, not ${flags.since}`);
+    since = new Date(flags.since).toISOString();
+  }
+  const data = await buildDigest({ client: cliClient(), repo, config, now: new Date(), botIssues, since, extended: flags.extended === true });
   console.log(renderDigest(data, config));
   return 0;
 }
