@@ -4,13 +4,15 @@
 //
 //   node tests/e2e/delegate.mjs <sandbox-clone-dir> [scenario-prefix ...]
 //
-// Run it from your own terminal, where `gh` is you (the admin). The delegate's
-// token comes from PIPELINE_DELEGATE_TOKEN, which this never prints. Set it
-// without echoing, for example in PowerShell:
+// Run it from your own terminal, where `gh` is you (the admin), against a clone
+// of the sandbox (brianm-di4u/pipeline-sandbox). The delegate's token comes from
+// PIPELINE_DELEGATE_TOKEN, which this never prints. Set it without echoing, for
+// example in PowerShell:
 //
 //   $env:PIPELINE_DELEGATE_TOKEN = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'Delegate token')).Password
 //
-// Without that variable it skips, and exits 0. The sandbox must run this
+// The token must belong to the expected delegate: gwb-gardener, or the login in
+// PIPELINE_DELEGATE_LOGIN. Without a token it skips, and exits 0. The sandbox must run this
 // version of the pipeline, workflows included, with the delegate account invited
 // as a collaborator and listed under `delegates` in pipeline.config.json on main,
 // with approve, rearm, and decide for design. This opens, merges, reverts and
@@ -21,6 +23,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const TOKEN = process.env.PIPELINE_DELEGATE_TOKEN ?? '';
+const EXPECTED = process.env.PIPELINE_DELEGATE_LOGIN || 'gwb-gardener';
 if (!TOKEN) {
   console.log('SKIP delegate e2e: PIPELINE_DELEGATE_TOKEN is not set. See the header of tests/e2e/delegate.mjs.');
   process.exit(0);
@@ -60,6 +63,10 @@ const mainConfig = () => JSON.parse(Buffer.from(api(`repos/${repo}/contents/pipe
 const grantOf = (config) => (config.delegates ?? []).find((d) => d.login?.toLowerCase() === delegate.login.toLowerCase());
 if (delegate.login.toLowerCase() === admin.toLowerCase()) {
   console.log('FAIL the delegate token belongs to the admin. Use a token made on the delegate account.');
+  process.exit(1);
+}
+if (delegate.login.toLowerCase() !== EXPECTED.toLowerCase()) {
+  console.log(`FAIL the delegate token belongs to ${delegate.login}, not ${EXPECTED}. Set PIPELINE_DELEGATE_LOGIN if that's intended.`);
   process.exit(1);
 }
 if (!grantOf(mainConfig())) {
