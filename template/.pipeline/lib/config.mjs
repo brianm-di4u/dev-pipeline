@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
+import { cleanDelegates } from './authority.mjs';
 
-export function parseConfig(text) {
+export function parseConfig(text, { warn = (message) => console.warn(message) } = {}) {
   const config = JSON.parse(text);
   for (const key of ['admins', 'tiers', 'merge', 'verify']) {
     if (!config[key]) throw new Error(`pipeline.config.json is missing "${key}"`);
@@ -8,9 +9,11 @@ export function parseConfig(text) {
   if (!Array.isArray(config.admins) || config.admins.length === 0) {
     throw new Error('pipeline.config.json needs at least one admin');
   }
+  // Optional. Validated only when present, and never thrown on.
+  if ('delegates' in config) config.delegates = cleanDelegates(config, warn);
   return config;
 }
 
-export function loadConfig(path = 'pipeline.config.json') {
-  return parseConfig(readFileSync(path, 'utf8'));
+export function loadConfig(path = 'pipeline.config.json', options) {
+  return parseConfig(readFileSync(path, 'utf8'), options);
 }

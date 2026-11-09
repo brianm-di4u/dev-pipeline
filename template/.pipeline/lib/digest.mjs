@@ -42,7 +42,7 @@ export function summarize({ merged, commentsByPr, decisions, config }) {
     humanTouches.push(comments.filter((c) => config.admins.includes(c.user?.login) && !c.body?.includes('🤖')).length);
     if (verdict) {
       const approval = findApproval(comments, config.admins, verdict.changeHash);
-      if (approval) approvals.push({ pr: pr.number, by: approval.user.login, at: approval.created_at });
+      if (approval) approvals.push({ pr: pr.number, by: approval.comment.user.login, at: approval.comment.created_at });
     }
   }
 

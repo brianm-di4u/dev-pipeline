@@ -1,6 +1,7 @@
 // The merge decision as a pure function, so every rule can be tested without
 // GitHub. `gate.mjs` gathers the inputs and publishes the result.
-import { checkContract, findApproval, parseVerdict } from './contract.mjs';
+import { authority } from './authority.mjs';
+import { checkContract, delegateBarriers, delegateRefusals, findApproval, parseVerdict, touchMarkers } from './contract.mjs';
 import { classify } from './tier.mjs';
 
 export function evaluateGate({
@@ -17,9 +18,14 @@ export function evaluateGate({
   citesMainRed = false,
   breakerTripped = false,
   defaultBranch = 'main',
+  // Read only when a delegate is configured. Left out, a delegate's approval
+  // can't count: the gate fails closed on what it couldn't check.
+  commitLogins,
+  suspended,
+  suspensions,
 }) {
   const { verdict, error: verdictError } = parseVerdict(pr.body);
-  const { tier, reasons } = classify({
+  const { tier, reasons, flags } = classify({
     changes,
     config,
     author: pr.author,
@@ -68,12 +74,27 @@ export function evaluateGate({
     blockers.push('Main is red. Only a revert or a PR citing the main-red issue can merge.');
   }
 
-  const approval = findApproval(comments, config.admins, hash);
+  const auth = authority(config);
+  const ctx = { flags, author: pr.author, commitLogins, touches: touchMarkers(comments), suspended, suspensions };
+  const approval = findApproval(comments, auth, hash, ctx);
   const policy = config.merge?.[`t${tier}`] ?? 'human';
   const needsHuman = policy !== 'auto' || (breakerTripped && tier > 0);
 
   const shortHash = hash.slice(0, 12);
   const base = { tier, reasons, hash, shortHash, blockers, approved: approval !== null };
+
+  // With no delegate configured, nothing below adds to the result or its text.
+  let delegate = null;
+  if (auth.delegates.length > 0) {
+    const barriers = Object.fromEntries(auth.delegates.map((grant) => [grant.login, delegateBarriers(auth, grant.login, ctx)]));
+    delegate = {
+      approvalRole: approval?.role ?? null,
+      mayApprove: Object.values(barriers).some((list) => list.length === 0),
+      barriers,
+      refusals: delegateRefusals(comments, auth, hash, ctx).map(({ login, reasons: why }) => ({ login, reasons: why })),
+    };
+    base.delegate = delegate;
+  }
 
   if (blockers.length > 0) {
     return {
@@ -101,16 +122,39 @@ export function evaluateGate({
       status: 'completed',
       conclusion: 'action_required',
       title: `T${tier}: waiting for approval`,
-      summary: render(base, [`${why} To approve this exact change, comment:\n\n\`/approve ${shortHash}\``]),
+      summary: render(base, [
+        `${why} To approve this exact change, comment:\n\n\`/approve ${shortHash}\``,
+        ...delegateLines(delegate),
+      ]),
     };
+  }
+  let approvedLine = 'All checks passed.';
+  if (approval) {
+    approvedLine = `Approved by ${approval.comment.user.login}${approval.role === 'delegate' ? ', a delegate' : ''}.`;
   }
   return {
     ...base,
     status: 'completed',
     conclusion: 'success',
     title: `T${tier}: ready to merge`,
-    summary: render(base, [approval ? `Approved by ${approval.user.login}.` : 'All checks passed.']),
+    summary: render(base, [approvedLine]),
   };
+}
+
+// Who can approve, said where the approver looks: the check summary.
+function delegateLines(delegate) {
+  if (!delegate) return [];
+  const lines = [''];
+  if (delegate.mayApprove) {
+    lines.push('A delegate may approve this change.');
+  } else {
+    const why = [...new Set(Object.values(delegate.barriers).flat())];
+    lines.push(`Only an admin can approve this change: ${why.join('; ')}.`);
+  }
+  for (const refusal of delegate.refusals) {
+    lines.push(`The approval by ${refusal.login} doesn't count: ${refusal.reasons.join('; ')}.`);
+  }
+  return lines;
 }
 
 function render({ tier, reasons, shortHash }, lines) {
