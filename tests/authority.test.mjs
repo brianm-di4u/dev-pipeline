@@ -210,7 +210,7 @@ test('a valid delegate is kept, with every grant spelled out', () => {
   const { config, warnings } = parseQuietly(withDelegates([{ login: 'gardener', approve: true, decide: ['design'] }]));
   assert.deepEqual(warnings, []);
   assert.deepEqual(config.delegates, [
-    { login: 'gardener', approve: true, approveExternal: false, decide: ['design'], rearm: false, direct: false },
+    { login: 'gardener', approve: true, approveExternal: false, approveWorkflows: false, decide: ['design'], rearm: false, direct: false },
   ]);
 });
 
@@ -306,6 +306,7 @@ test('classify reports symlinks, scripts, outside authors and a council raise as
     scripts: ['package.json'],
     symlinks: ['docs/link.md'],
     raised: true,
+    workflows: [],
   });
 });
 

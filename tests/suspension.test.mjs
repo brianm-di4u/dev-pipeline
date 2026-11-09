@@ -38,33 +38,33 @@ const redIssue = (number, target, { marker = true } = {}) => ({
 // evaluateSuspension
 // ---------------------------------------------------------------------------
 
+// The PRs the bot labelled delegate-approved when they merged.
+const labelled = (...numbers) => new Set(numbers);
+
 test('two delegate-approved merges that went bad suspend delegates', () => {
   const merges = [merge(1), merge(2), merge(3), revertOf(4, 1)];
-  const commentsByPr = new Map([[1, [approve(1, 'gardener')]], [2, [approve(2, 'gardener')]], [3, [approve(3, 'owner')]]]);
-  const result = evaluateSuspension({ merges, commentsByPr, redIssues: [redIssue(9, 2)], config: delegated() });
+  const result = evaluateSuspension({ merges, delegateApproved: labelled(1, 2), redIssues: [redIssue(9, 2)], config: delegated() });
   assert.equal(result.suspend, true);
-  assert.deepEqual(result.bad.map((b) => [b.number, b.login, b.reverted, b.red]), [
-    [2, 'gardener', false, [9]],
-    [1, 'gardener', true, []],
+  assert.deepEqual(result.bad.map((b) => [b.number, b.reverted, b.red]), [
+    [2, false, [9]],
+    [1, true, []],
   ]);
   assert.deepEqual(result.approved.sort(), [1, 2]);
 });
 
-test('one bad merge, or bad merges an admin approved, do not suspend', () => {
+test('one bad merge, or bad merges the bot did not label delegate-approved, do not suspend', () => {
   const merges = [merge(1), merge(2), revertOf(4, 1), revertOf(5, 2)];
-  const one = evaluateSuspension({ merges, commentsByPr: new Map([[1, [approve(1, 'gardener')]]]), redIssues: [], config: delegated() });
+  const one = evaluateSuspension({ merges, delegateApproved: labelled(1), redIssues: [], config: delegated() });
   assert.equal(one.suspend, false);
   assert.equal(one.failures, 1);
-  // An admin's approval at the same hash makes it the admin's call.
-  const coApproved = new Map([[1, [approve(1, 'gardener'), approve(1, 'owner')]], [2, [approve(2, 'owner')]]]);
-  assert.equal(evaluateSuspension({ merges, commentsByPr: coApproved, redIssues: [], config: delegated() }).failures, 0);
+  assert.equal(evaluateSuspension({ merges, delegateApproved: labelled(), redIssues: [], config: delegated() }).failures, 0);
 });
 
 test('a merge both reverted and red counts once, and old issues map by their title', () => {
   const merges = [merge(1), revertOf(4, 1)];
   const result = evaluateSuspension({
     merges,
-    commentsByPr: new Map([[1, [approve(1, 'gardener')]]]),
+    delegateApproved: labelled(1),
     redIssues: [redIssue(9, 1, { marker: false }), redIssue(10, 1)],
     config: delegated(),
   });
@@ -76,23 +76,26 @@ test('a merge both reverted and red counts once, and old issues map by their tit
 
 test('the limit is configurable, the window counts ordinary merges, and a lift starts the count over', () => {
   const merges = [merge(1), merge(2), revertOf(4, 1), revertOf(5, 2)];
-  const commentsByPr = new Map([[1, [approve(1, 'gardener')]], [2, [approve(2, 'gardener')]]]);
-  assert.equal(evaluateSuspension({ merges, commentsByPr, redIssues: [], config: delegated({ breaker: { window: 20, delegateMaxFailures: 3 } }) }).suspend, false);
-  assert.equal(evaluateSuspension({ merges, commentsByPr, redIssues: [], config: delegated(), since: '2026-11-10T12:00:00Z' }).suspend, false);
+  const delegateApproved = labelled(1, 2);
+  assert.equal(evaluateSuspension({ merges, delegateApproved, redIssues: [], config: delegated({ breaker: { window: 20, delegateMaxFailures: 3 } }) }).suspend, false);
+  assert.equal(evaluateSuspension({ merges, delegateApproved, redIssues: [], config: delegated(), since: '2026-11-10T12:00:00Z' }).suspend, false);
   // Docs merges (T0) don't count and can't push approved merges out of the window.
   const docs = Array.from({ length: 30 }, (_, i) => merge(100 + i, 12, { body: verdict(100 + i, 0) }));
-  assert.equal(evaluateSuspension({ merges: [...merges, ...docs], commentsByPr, redIssues: [], config: delegated() }).suspend, true);
+  assert.equal(evaluateSuspension({ merges: [...merges, ...docs], delegateApproved, redIssues: [], config: delegated() }).suspend, true);
   const recent = Array.from({ length: 20 }, (_, i) => merge(200 + i, 20));
-  assert.equal(evaluateSuspension({ merges: [...merges, ...recent], commentsByPr, redIssues: [], config: delegated() }).suspend, false);
+  assert.equal(evaluateSuspension({ merges: [...merges, ...recent], delegateApproved, redIssues: [], config: delegated() }).suspend, false);
 });
 
 // ---------------------------------------------------------------------------
 // checkDelegates and the admin lift
 // ---------------------------------------------------------------------------
 
+const approvedLabel = [{ event: 'labeled', label: { name: 'pipeline:delegate-approved' }, actor: { login: 'github-actions[bot]' }, created_at: '2026-11-12T00:00:00Z' }];
 const badHistory = () => ({
   pulls: [merge(1), merge(2), revertOf(4, 1), revertOf(5, 2), { number: 7, state: 'open', head: { sha: 'h7' } }, { number: 8, state: 'open', head: { sha: 'h8' } }],
   comments: { 1: [approve(1, 'gardener')], 2: [approve(2, 'gardener')], 7: [approve(7, 'gardener')], 8: [approve(8, 'owner')] },
+  // The bot labelled #1 and #2 when they merged. Deleting the approvals later changes nothing.
+  events: { 1: approvedLabel, 2: approvedLabel },
 });
 
 test('without delegates, nothing about delegates is read or written', async () => {
@@ -114,7 +117,7 @@ test('a suspension opens a bot issue and re-publishes the gate for open PRs a de
   assert.match(issue.title, /^Delegates suspended: 2 delegate-approved merges went bad$/);
   assert.deepEqual(issue.labels, ['pipeline:delegate-suspended']);
   assert.match(issue.body, /^@owner /);
-  assert.match(issue.body, /#2, approved by gardener: reverted/);
+  assert.match(issue.body, /#2: reverted/);
   assert.deepEqual(republished, [7], 'only the open PR holding a delegate approval');
 
   const state = await readSuspension(client, 'o/r', delegated());
@@ -205,8 +208,20 @@ test('the forged-gate check skips merges judged before delegates were configured
 
 test('a genuine gate check on the merged head is accepted', async () => {
   const client = fakeGitHub({ routes: provenanceRoutes(delegated(), gateCheck()) });
-  assert.deepEqual(await checkGateProvenance(client, 'o/r', delegated(), 'm1', async () => []), { ok: true, pr: 12 });
+  assert.deepEqual(await checkGateProvenance(client, 'o/r', delegated(), 'm1', async () => []), { ok: true, pr: 12, approval: null });
   assert.equal(posted(client).length, 0);
+});
+
+test('a merge the gate let through on a delegate approval is labelled at merge', async () => {
+  const summary = 'Approved by gardener, a delegate.\n\n<!-- pipeline:approval role=delegate login=gardener -->';
+  const client = fakeGitHub({ routes: provenanceRoutes(delegated(), gateCheck({ output: { summary } })) });
+  const result = await checkGateProvenance(client, 'o/r', delegated(), 'm1', async () => []);
+  assert.deepEqual(result.approval, { role: 'delegate', login: 'gardener' });
+  assert.deepEqual(posted(client, '/issues/12/labels'), [{ labels: ['pipeline:delegate-approved'] }]);
+  // An admin-approved merge isn't labelled.
+  const admin = fakeGitHub({ routes: provenanceRoutes(delegated(), gateCheck({ output: { summary: '<!-- pipeline:approval role=admin login=owner -->' } })) });
+  await checkGateProvenance(admin, 'o/r', delegated(), 'm1', async () => []);
+  assert.deepEqual(posted(admin, '/labels'), []);
 });
 
 test('a forged gate check opens an audit issue and suspends delegates, once', async () => {
@@ -264,9 +279,14 @@ test('the audit closes only protection issues, and leaves a forged-gate issue op
     { number: 3, title: 'Branch protection changed', labels: [{ name: 'pipeline:audit' }], user: BOT_USER },
     { number: 4, title: 'pipeline/gate on #12 did not come from the gate', labels: [{ name: 'pipeline:audit' }], user: BOT_USER },
   ];
-  const client = fakeGitHub({ issues, routes: { 'GET /repos/o/r': { default_branch: 'main' }, 'GET /repos/o/r/branches/main': healthy } });
-  await audit(client, 'o/r', config);
+  const routes = { 'GET /repos/o/r': { default_branch: 'main' }, 'GET /repos/o/r/branches/main': healthy };
+  const client = fakeGitHub({ issues, routes });
+  await audit(client, 'o/r', delegated());
   assert.deepEqual(client.calls.filter((c) => c.method === 'PATCH').map((c) => c.path), ['/repos/o/r/issues/3']);
+  // Without delegates, as before: every open bot audit issue closes.
+  const plain = fakeGitHub({ issues, routes });
+  await audit(plain, 'o/r', config);
+  assert.deepEqual(plain.calls.filter((c) => c.method === 'PATCH').map((c) => c.path).sort(), ['/repos/o/r/issues/3', '/repos/o/r/issues/4']);
 });
 
 test('the check run is stamped with its run only when a delegate is configured', () => {

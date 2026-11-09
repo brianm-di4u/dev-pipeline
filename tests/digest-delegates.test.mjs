@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import * as before from './fixtures/before-delegates/digest.mjs';
 import { BOT_USER, fakeGitHub } from './fixtures/fake-github.mjs';
 import { renderClassMarker } from '../template/.pipeline/lib/contract.mjs';
-import { approvalWaits, buildDigest, mergeApproval, renderDigest, summarize, tallyReactions } from '../template/.pipeline/lib/digest.mjs';
+import { READ_FAILED, approvalWaits, buildDigest, mergeApproval, renderDigest, summarize, tallyReactions } from '../template/.pipeline/lib/digest.mjs';
 
 const config = { admins: ['owner'], breaker: { window: 20, maxFailures: 3 } };
 const delegated = { ...config, delegates: [{ login: 'gardener', approve: true, decide: ['design'] }] };
@@ -83,21 +83,22 @@ test('the approval that let a merge through is the admin\'s when there is one', 
   assert.equal(mergeApproval([approve(5, 'gardener')], config, hashOf(5)), null);
 });
 
-test('approval wait runs from the first block, and an approval before it counts as 0', () => {
-  const blocks = new Map([[1, '2026-11-11T10:00:00Z'], [2, '2026-11-11T13:00:00Z']]);
+test('approval wait runs from the first block; an approval before it counts as 0; a PR never blocked, or not read, is apart', () => {
+  const blocks = new Map([[1, '2026-11-11T10:00:00Z'], [2, '2026-11-11T13:00:00Z'], [3, null], [4, READ_FAILED]]);
   assert.deepEqual(
     approvalWaits(
       [
         { pr: 1, at: '2026-11-11T12:30:00Z', role: 'admin' },
         { pr: 2, at: '2026-11-11T12:00:00Z', role: 'delegate' },
         { pr: 3, at: '2026-11-11T12:00:00Z', role: 'admin' },
+        { pr: 4, at: '2026-11-11T12:00:00Z', role: 'admin' },
       ],
       blocks,
     ),
     [
       { pr: 1, role: 'admin', hours: 2.5, beforeBlock: false },
       { pr: 2, role: 'delegate', hours: 0, beforeBlock: true },
-      { pr: 3, role: 'admin', hours: 0, beforeBlock: true },
+      { pr: 4, role: 'admin', readFailed: true },
     ],
   );
 });
@@ -126,8 +127,8 @@ test('with a delegate, the digest splits by role and measures the delegate', asy
   assert.equal(s.approvalWait.delegate.median, 4);
   assert.equal(s.approvalWait.beforeFirstBlock, 1, '#1 was approved before its first block');
   assert.deepEqual(s.delegateReverted, [2]);
-  assert.deepEqual(s.byWorker.opus, { merged: 1, rounds: { median: 2, p95: 2 }, reverted: 1 });
-  assert.deepEqual(s.byWorker.sonnet, { merged: 1, rounds: { median: 2, p95: 2 }, reverted: 0 });
+  assert.deepEqual(s.byWorker.find((w) => w.model === 'opus'), { model: 'opus', merged: 1, rounds: { median: 2, p95: 2 }, reverted: 1 });
+  assert.deepEqual(s.byWorker.find((w) => w.model === 'sonnet'), { model: 'sonnet', merged: 1, rounds: { median: 2, p95: 2 }, reverted: 0 });
   assert.deepEqual(s.escalations, { opened: 1, answered: 1, answerHours: 4, open: [] });
   assert.equal(s.agreement.rationales, 1);
   assert.deepEqual(data.state.suspended, [12]);
@@ -156,4 +157,15 @@ test('pipeline metrics can show the delegate measures before any delegate exists
   assert.equal(data.since, '2026-11-07T00:00:00.000Z');
   assert.deepEqual(data.summary.roles.approvals, { admin: 1, delegate: 0 });
   assert.match(renderDigest(data, config), /## Delegates/);
+});
+
+test('a worker model from a PR body is checked before it reaches the digest, and counted safely', () => {
+  const body = (model) =>
+    `<!-- pipeline:verdict\n${JSON.stringify({ changeHash: hashOf(9), tier: 1, rounds: 1, open: { blocker: 0, should: 0 }, worker: { model } })}\n-->`;
+  const merged = ['sonnet', '__proto__', 'constructor', 'x | y', '@owner ping', 'a'.repeat(101)].map((model, i) => ({ number: 20 + i, body: body(model) }));
+  const s = summarize({ merged, commentsByPr: new Map(), decisions: [], config: delegated });
+  assert.deepEqual(s.byWorker.map((w) => w.model), ['sonnet', '__proto__', 'constructor']);
+  assert.equal(s.byWorker.find((w) => w.model === '__proto__').merged, 1);
+  const text = renderDigest({ since: '2026-11-01T00:00:00Z', summary: s, decisions: [], state: { breaker: [], mainRed: [], audit: [] }, extended: true });
+  assert.doesNotMatch(text, /@owner ping|x \| y/);
 });

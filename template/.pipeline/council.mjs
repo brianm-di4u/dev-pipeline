@@ -14,6 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { authority } from './lib/authority.mjs';
 import { MODEL_NAME, parseConfig } from './lib/config.mjs';
 import { findDecision, renderVerdict } from './lib/contract.mjs';
 import { changeSet, git, tryGit } from './lib/git.mjs';
@@ -54,14 +55,23 @@ function saveLedger(ledger) {
 // for delegate suspension, which this can't see. The gate checks that again, and it is the authority.
 function decided(issues, config) {
   if (issues.length === 0) return false;
-  return issues.every((issue) => {
-    const pages = JSON.parse(
-      execFileSync('gh', ['api', '--paginate', '--slurp', `repos/{owner}/{repo}/issues/${issue}/comments?per_page=100`], {
+  const ghJson = (path, all = true) =>
+    JSON.parse(
+      execFileSync('gh', ['api', ...(all ? ['--paginate', '--slurp'] : []), path], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       }),
     );
-    return findDecision(pages.flat(), config, { ignoreSuspension: true }) !== null;
+  const delegated = authority(config).delegates.length > 0;
+  return issues.every((issue) => {
+    const comments = ghJson(`repos/{owner}/{repo}/issues/${issue}/comments?per_page=100`).flat();
+    const ctx = { ignoreSuspension: true };
+    // A delegate's /decide also needs the issue's author and label history.
+    if (delegated) {
+      ctx.issueAuthor = ghJson(`repos/{owner}/{repo}/issues/${issue}`, false).user?.login ?? null;
+      ctx.events = ghJson(`repos/{owner}/{repo}/issues/${issue}/events?per_page=100`).flat();
+    }
+    return findDecision(comments, config, ctx) !== null;
   });
 }
 

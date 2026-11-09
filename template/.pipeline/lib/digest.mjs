@@ -35,13 +35,29 @@ export function mergeApproval(comments, auth, hash) {
 
 // Hours from the gate first asking for approval to the approval. An approval made
 // before the first block on the merged head (a rebase moves the head) counts as 0.
+// `firstBlocks` maps a PR to its first block's time, to null when its merged head
+// was never blocked, or to READ_FAILED. A PR never blocked has no wait to measure,
+// so it is skipped, and a failed read is counted apart rather than guessed at.
+export const READ_FAILED = Symbol('read failed');
+
 export function approvalWaits(approvals, firstBlocks) {
-  return approvals.map(({ pr, at, role }) => {
+  const waits = [];
+  for (const { pr, at, role } of approvals) {
     const block = firstBlocks.get(pr);
-    const hours = block ? (Date.parse(at) - Date.parse(block)) / HOUR : -1;
-    return hours < 0 ? { pr, role, hours: 0, beforeBlock: true } : { pr, role, hours, beforeBlock: false };
-  });
+    if (block === READ_FAILED) {
+      waits.push({ pr, role, readFailed: true });
+      continue;
+    }
+    if (!block) continue;
+    const hours = (Date.parse(at) - Date.parse(block)) / HOUR;
+    waits.push(hours < 0 ? { pr, role, hours: 0, beforeBlock: true } : { pr, role, hours, beforeBlock: false });
+  }
+  return waits;
 }
+
+// A worker model name comes from an editable PR body, so it is checked before it
+// reaches a bot issue.
+const MODEL_NAME = /^[A-Za-z0-9._:\[\]-]{1,100}$/;
 
 const stats = (values) => ({ median: percentile(values, 50), p95: percentile(values, 95) });
 
@@ -58,7 +74,7 @@ export function summarize({ merged, commentsByPr, decisions, config, firstBlocks
   const revertedShas = merged.map((pr) => claimedRevert(pr.body)).filter(Boolean);
   const wasReverted = (pr) =>
     revertedShas.some((sha) => pr.merge_commit_sha && (pr.merge_commit_sha.startsWith(sha) || sha.startsWith(pr.merge_commit_sha)));
-  const byWorker = {};
+  const byWorker = new Map();
   const delegateReverted = [];
 
   for (const pr of merged) {
@@ -77,8 +93,9 @@ export function summarize({ merged, commentsByPr, decisions, config, firstBlocks
         dispositions[finding.disposition] = (dispositions[finding.disposition] ?? 0) + 1;
       }
       const model = verdict.worker?.model;
-      if (model) {
-        const entry = (byWorker[model] ??= { merged: 0, rounds: [], reverted: 0 });
+      if (typeof model === 'string' && MODEL_NAME.test(model)) {
+        if (!byWorker.has(model)) byWorker.set(model, { merged: 0, rounds: [], reverted: 0 });
+        const entry = byWorker.get(model);
         entry.merged += 1;
         entry.rounds.push(verdict.rounds);
         if (wasReverted(pr)) entry.reverted += 1;
@@ -118,15 +135,16 @@ export function summarize({ merged, commentsByPr, decisions, config, firstBlocks
   };
   if (!delegated && reactions === null && escalations === null && firstBlocks.size === 0) return summary;
 
-  const count = (list, role) => list.filter((item) => item.role === role).length;
-  const waited = approvalWaits(
+  const count = (list, role) => list.filter((item) => (item.role ?? 'admin') === role).length;
+  const all = approvalWaits(
     approvals.map((a) => ({ ...a, role: a.role ?? 'admin' })),
     firstBlocks,
   );
+  const waited = all.filter((w) => !w.readFailed);
   return {
     ...summary,
     roles: {
-      approvals: { admin: count(waited, 'admin'), delegate: count(waited, 'delegate') },
+      approvals: { admin: count(approvals, 'admin'), delegate: count(approvals, 'delegate') },
       decisions: { admin: decisions.filter((d) => d.decidedBy === 'admin').length, delegate: decisions.filter((d) => d.decidedBy === 'delegate').length },
     },
     approvalWait: {
@@ -134,13 +152,12 @@ export function summarize({ merged, commentsByPr, decisions, config, firstBlocks
       admin: stats(waited.filter((w) => w.role === 'admin' && !w.beforeBlock).map((w) => w.hours)),
       delegate: stats(waited.filter((w) => w.role === 'delegate' && !w.beforeBlock).map((w) => w.hours)),
       beforeFirstBlock: waited.filter((w) => w.beforeBlock).length,
+      readFailures: all.filter((w) => w.readFailed).length,
     },
     delegateReverted,
     escalations,
     agreement: reactions,
-    byWorker: Object.fromEntries(
-      Object.entries(byWorker).map(([model, entry]) => [model, { merged: entry.merged, rounds: stats(entry.rounds), reverted: entry.reverted }]),
-    ),
+    byWorker: [...byWorker.entries()].map(([model, entry]) => ({ model, merged: entry.merged, rounds: stats(entry.rounds), reverted: entry.reverted })),
   };
 }
 
@@ -159,7 +176,12 @@ export function tallyReactions(rationales, reactionsById, admins) {
 }
 
 async function firstBlock(client, repo, sha) {
-  const runs = await client.list(`/repos/${repo}/commits/${sha}/check-runs?check_name=pipeline%2Fgate&filter=all&per_page=100`).catch(() => []);
+  let runs;
+  try {
+    runs = await client.list(`/repos/${repo}/commits/${sha}/check-runs?check_name=pipeline%2Fgate&filter=all&per_page=100`);
+  } catch {
+    return READ_FAILED;
+  }
   const blocks = runs
     .filter((run) => run.name === 'pipeline/gate' && run.conclusion === 'action_required' && run.app?.slug === 'github-actions')
     .map((run) => run.completed_at ?? run.started_at)
@@ -205,7 +227,9 @@ export async function buildDigest({ client, repo, now, config, botIssues, since:
   const rationales = [];
   for (const [index, issue] of decisionIssues.entries()) {
     const comments = await client.list(`/repos/${repo}/issues/${issue.number}/comments?per_page=100`).catch(() => []);
-    decisions[index].decidedBy = findDecision(comments, auth, { ignoreSuspension: true })?.role ?? null;
+    const events = await client.list(`/repos/${repo}/issues/${issue.number}/events?per_page=100`).catch(() => undefined);
+    const ctx = { ignoreSuspension: true, issueAuthor: issue.user?.login ?? null, events };
+    decisions[index].decidedBy = findDecision(comments, auth, ctx)?.role ?? null;
     rationales.push(...comments.filter((c) => actorOf(c, auth) === 'delegate' && RATIONALE_RE.test(c.body ?? '')));
   }
   for (const comments of commentsByPr.values()) {
@@ -219,8 +243,7 @@ export async function buildDigest({ client, repo, now, config, botIssues, since:
   const firstBlocks = new Map();
   for (const pr of merged) {
     if (pr.head?.sha) {
-      const block = await firstBlock(client, repo, pr.head.sha);
-      if (block) firstBlocks.set(pr.number, block);
+      firstBlocks.set(pr.number, await firstBlock(client, repo, pr.head.sha));
     }
   }
 
@@ -269,7 +292,7 @@ function delegateSection(s) {
   const wait = s.approvalWait;
   lines.push(
     `| Approvals | admin ${s.roles.approvals.admin}, delegate ${s.roles.approvals.delegate} |`,
-    `| Approval wait | median ${value(wait.median, ' h')}, p95 ${value(wait.p95, ' h')} (admin ${value(wait.admin.median, ' h')}, delegate ${value(wait.delegate.median, ' h')}); ${wait.beforeFirstBlock} approved before the first block |`,
+    `| Approval wait | median ${value(wait.median, ' h')}, p95 ${value(wait.p95, ' h')} (admin ${value(wait.admin.median, ' h')}, delegate ${value(wait.delegate.median, ' h')}); ${wait.beforeFirstBlock} approved before the first block${wait.readFailures ? `, ${wait.readFailures} not read` : ''} |`,
     `| Decisions | admin ${s.roles.decisions.admin}, delegate ${s.roles.decisions.delegate} |`,
     `| Delegate-approved merges reverted | ${s.delegateReverted.length ? s.delegateReverted.map((n) => `#${n}`).join(', ') : 'none'} |`,
   );
@@ -282,10 +305,10 @@ function delegateSection(s) {
     const rate = s.agreement.rate === null ? 'no reactions yet' : `${Math.round(s.agreement.rate * 100)}% agree`;
     lines.push(`| Your reactions to rationale | 👍 ${s.agreement.up}, 👎 ${s.agreement.down} on ${s.agreement.rationales} rationales (${rate}) |`);
   }
-  const models = Object.entries(s.byWorker ?? {});
+  const models = s.byWorker ?? [];
   if (models.length > 0) {
     lines.push('', '## By worker model', '', '| Model | Merged | Council rounds | Reverted |', '|---|---|---|---|');
-    lines.push(...models.map(([model, e]) => `| ${model} | ${e.merged} | median ${value(e.rounds.median)}, p95 ${value(e.rounds.p95)} | ${e.reverted} |`));
+    lines.push(...models.map((e) => `| ${e.model} | ${e.merged} | median ${value(e.rounds.median)}, p95 ${value(e.rounds.p95)} | ${e.reverted} |`));
   }
   return lines;
 }

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gather } from './gate.mjs';
 import { authority } from './lib/authority.mjs';
-import { loadConfig } from './lib/config.mjs';
+import { parseConfig } from './lib/config.mjs';
 import { evaluateGate } from './lib/gate-core.mjs';
 import { readBlob, tryGit } from './lib/git.mjs';
 import { cliClient } from './lib/github.mjs';
@@ -41,13 +41,13 @@ async function evaluatePr(client, repo, number) {
   return evaluateGate(await gather({ client, repo, number, cwd: process.cwd() }));
 }
 
-async function heldPrs(client, repo, open, evaluate) {
+async function heldPrs(client, repo, open, evaluate, login) {
   const items = [];
   for (const pr of open.filter((candidate) => !candidate.draft)) {
     const runs = await client.list(`/repos/${repo}/commits/${pr.head.sha}/check-runs?check_name=pipeline%2Fgate&filter=latest&per_page=100`);
     if (gateCheck(runs)?.conclusion !== 'action_required') continue;
     try {
-      items.push(prItem(pr, await evaluate(client, repo, pr.number)));
+      items.push(prItem(pr, await evaluate(client, repo, pr.number), login));
     } catch (error) {
       items.push({ number: pr.number, title: pr.title, url: pr.html_url, error: error.message });
     }
@@ -96,7 +96,7 @@ export async function buildInbox({
   const state = await readRepoState(client, repo, config);
   const suspension = auth.delegates.length > 0 ? { suspended: state.suspended, suspensions: state.suspensions } : {};
   const open = await client.list(`/repos/${repo}/pulls?state=open&per_page=100`);
-  const prs = await heldPrs(client, repo, open, evaluate);
+  const prs = await heldPrs(client, repo, open, evaluate, login);
 
   const decisionIssues = (await client.list(`/repos/${repo}/issues?state=open&labels=decision-needed&per_page=100`)).filter(
     (issue) => !issue.pull_request,
@@ -104,7 +104,8 @@ export async function buildInbox({
   const decisions = [];
   for (const issue of decisionIssues) {
     const comments = await client.list(`/repos/${repo}/issues/${issue.number}/comments?per_page=100`);
-    decisions.push(decisionItem(issue, comments, config, suspension));
+    const events = await client.list(`/repos/${repo}/issues/${issue.number}/events?per_page=100`);
+    decisions.push(decisionItem(issue, comments, config, suspension, events));
   }
 
   const escalations = (await client.list(`/repos/${repo}/issues?state=open&labels=admin-needed&per_page=100`))
@@ -143,12 +144,20 @@ export async function buildInbox({
   };
 }
 
+// Policy comes from the default branch, as it does for the gate, so a change in
+// this clone's working tree can't widen what the inbox calls actionable.
+export async function baseConfig(client, repo, defaultBranch) {
+  const file = await client.get(`/repos/${repo}/contents/pipeline.config.json?ref=${encodeURIComponent(defaultBranch)}`);
+  return parseConfig(Buffer.from(file.content, 'base64').toString('utf8'));
+}
+
 async function inbox() {
-  const config = loadConfig();
   try {
-    const repo = gh(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']);
+    const { nameWithOwner: repo, defaultBranchRef } = JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef']));
     const login = gh(['api', 'user', '--jq', '.login']);
-    const result = await buildInbox({ client: cliClient(), repo, config, now: new Date(), login });
+    const client = cliClient();
+    const config = await baseConfig(client, repo, defaultBranchRef.name);
+    const result = await buildInbox({ client, repo, config, now: new Date(), login });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (error) {

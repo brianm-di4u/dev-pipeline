@@ -79,8 +79,14 @@ test('without delegates, state issues come from the same label query as before',
 // With a delegate.
 // ---------------------------------------------------------------------------
 
+// What GitHub keeps when a label is removed: the bot's original labelled event.
+const botLabel = (name) => [{ event: 'labeled', label: { name }, actor: { login: 'github-actions[bot]' }, created_at: at(8) }];
+
 test('a stripped label no longer hides a bot state issue', async () => {
-  const client = fakeGitHub({ issues: [red(4, { labels: [] }), breaker(5, { labels: [] })] });
+  const client = fakeGitHub({
+    issues: [red(4, { labels: [], title: 'Notes' }), breaker(5, { labels: [] })],
+    events: { 4: botLabel('pipeline:main-red'), 5: botLabel('pipeline:breaker') },
+  });
   const state = await readRepoState(client, 'o/r', delegated());
   assert.equal(state.mainRed, true);
   assert.equal(state.breakerTripped, true);
@@ -127,7 +133,7 @@ for (const [name, comments, cfg, ctx, why] of [
   ['without the offer', [say('/rearm', 'gardener')], delegated(), free, /did not offer/],
   ['before the offer', [say('/rearm', 'gardener', at(8)), grantOk], delegated(), free, /before the bot offered/],
   ['with no rearm grant', [grantOk, say('/rearm', 'gardener')], delegated({ rearm: false }), free, /no rearm grant/],
-  ['while suspended', [grantOk, say('/rearm', 'gardener')], delegated(), { suspended: true, suspensions: [] }, /suspended/],
+  ['posted during the current suspension', [grantOk, say('/rearm', 'gardener')], delegated(), { suspended: true, suspensions: [{ from: at(9, 30), to: null }] }, /posted while/],
   ['inside a suspension window', [grantOk, say('/rearm', 'gardener')], delegated(), { suspended: false, suspensions: [{ from: at(9, 30), to: at(11) }] }, /posted while/],
   ['with unknown suspension', [grantOk, say('/rearm', 'gardener')], delegated(), {}, /could not be read/],
   ['with an edited offer', [{ ...grantOk, updated_at: at(9, 5) }, say('/rearm', 'gardener')], delegated(), free, /did not offer/],
@@ -137,6 +143,26 @@ for (const [name, comments, cfg, ctx, why] of [
     assert.ok(rearmProblems(comments.find((c) => c.user.login === 'gardener'), cfg, comments, ctx).some((r) => why.test(r)));
   });
 }
+
+test('a re-arm made before a suspension still counts during it', () => {
+  const ctx = { suspended: true, suspensions: [{ from: at(11), to: null }] };
+  assert.equal(rearmBy([grantOk, say('/rearm', 'gardener', at(10))], delegated(), ctx).role, 'delegate');
+});
+
+test('what a bot issue is comes from its own labelled event, not an edited label or title', async () => {
+  // A person can add the breaker label to the bot's digest issue; that doesn't make it a breaker.
+  const faked = fakeGitHub({
+    issues: [issue(9, 'Weekly digest: x', 'pipeline:breaker')],
+    events: { 9: [...botLabel('pipeline:digest'), { event: 'labeled', label: { name: 'pipeline:breaker' }, actor: { login: 'gardener' }, created_at: at(9) }] },
+  });
+  assert.equal((await readRepoState(faked, 'o/r', delegated())).breakerTripped, false);
+  // A closed suspension whose label was stripped and title edited still counts, if it looks like no other kind.
+  const hidden = fakeGitHub({
+    issues: [suspend(3, { state: 'closed', labels: [], title: 'Old note' })],
+    events: { 3: botLabel('pipeline:delegate-suspended') },
+  });
+  assert.equal((await readSuspension(hidden, 'o/r', delegated())).suspended, true);
+});
 
 test('a closed breaker re-armed by a delegate within its grant is no longer tripped', async () => {
   const client = fakeGitHub({
@@ -222,7 +248,7 @@ test('a delegate /rearm closes the breaker when it counts, and says why when it 
   assert.match(posted(refused, '/comments')[0].body, /^The re-arm by gardener doesn't count: the bot did not offer/);
   assert.equal(refused.calls.some((c) => c.method === 'PATCH'), false);
 
-  const stripped = fakeGitHub({ issues: [breaker(5, { labels: [] })], comments: { 5: [grantOk, rearm] } });
+  const stripped = fakeGitHub({ issues: [breaker(5, { labels: [] })], comments: { 5: [grantOk, rearm] }, events: { 5: botLabel('pipeline:breaker') } });
   await issueEvent(stripped, 'o/r', delegated(), 'issue_comment', breakerEvent(rearm, []), free);
   assert.match(posted(stripped, '/comments')[0].body, /^Re-armed by delegate/, 'found by its title');
 });
@@ -324,7 +350,9 @@ test('a delegate approval is recorded quietly, or refused with the reason', () =
   assert.doesNotMatch(refusal, /@owner/);
 
   const touched = input(cfg, { comments: [comment], touches: [{ kind: 'label' }] });
-  assert.match(approvalNotice(comment, touched, evaluateGate(touched)), /a delegate pushed to it/);
+  assert.match(approvalNotice(comment, touched, evaluateGate(touched)), /the bot has marked it as touched by a delegate/);
+  const pushed = input(cfg, { comments: [comment], touches: [{ kind: 'push' }] });
+  assert.match(approvalNotice(comment, pushed, evaluateGate(pushed)), /a delegate pushed to it/);
   assert.equal(evaluateGate(touched).conclusion, 'action_required');
 
   const stale = say('/approve 111111111111', 'gardener');

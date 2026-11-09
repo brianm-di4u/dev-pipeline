@@ -75,6 +75,8 @@ def _pipeline_config() -> dict[str, Any]:
 
 
 DECISION_CLASSES = ("design", "determination", "legal", "security", "major")
+# A GitHub login, as .pipeline/lib/authority.mjs checks it.
+LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
 
 # Delegates as .pipeline/lib/authority.mjs keeps them: a malformed entry, or one
@@ -87,12 +89,12 @@ def _delegates(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return {}
     kept: dict[str, dict[str, Any]] = {}
     for entry in entries:
-        if not isinstance(entry, dict) or not isinstance(entry.get("login"), str) or not entry["login"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("login"), str) or not LOGIN.match(entry["login"]):
             continue
         login = entry["login"].lower()
         if login in admins or login in kept:
             continue
-        if any(flag in entry and not isinstance(entry[flag], bool) for flag in ("approve", "approveExternal", "rearm", "direct")):
+        if any(flag in entry and not isinstance(entry[flag], bool) for flag in ("approve", "approveExternal", "approveWorkflows", "rearm", "direct")):
             continue
         decide = entry.get("decide", [])
         if not isinstance(decide, list) or not all(c in DECISION_CLASSES for c in decide):

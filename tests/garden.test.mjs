@@ -38,19 +38,29 @@ test('decision options are read from the request, recommendation marked', () => 
   ]);
 });
 
+const labelledOnce = [{ event: 'labeled', label: { name: 'decision-needed' }, actor: { login: 'owner' }, created_at: '2026-11-09T08:00:00Z' }];
+
 test('a decision item carries the recorded class, who may decide, and a class mismatch', () => {
-  const issue = { number: 7, title: 'Decision: x', body: '**Class:** design\n- **A:** y' };
-  const item = decisionItem(issue, [bot(renderClassMarker('design'))], delegated(), { suspended: false, suspensions: [] });
+  const issue = { number: 7, title: 'Decision: x', body: '**Class:** design\n- **A:** y', user: { login: 'owner' } };
+  const item = decisionItem(issue, [bot(renderClassMarker('design'))], delegated(), { suspended: false, suspensions: [] }, labelledOnce);
   assert.equal(item.class, 'design');
   assert.deepEqual(item.deciders, ['gardener']);
   assert.equal(item.delegateMayDecide, true);
   assert.equal(item.classMismatch, false);
 
-  const lowered = decisionItem(issue, [bot(renderClassMarker('major'))], delegated(), { suspended: false, suspensions: [] });
+  const lowered = decisionItem(issue, [bot(renderClassMarker('major'))], delegated(), { suspended: false, suspensions: [] }, labelledOnce);
   assert.equal(lowered.delegateMayDecide, false, 'the record, not the edited body, rules');
   assert.equal(lowered.classMismatch, true);
-  assert.equal(decisionItem(issue, [bot(renderClassMarker('design'))], delegated(), { suspended: true, suspensions: [] }).delegateMayDecide, false);
-  assert.equal(decisionItem(issue, [], delegated(), {}).class, null);
+  assert.equal(decisionItem(issue, [bot(renderClassMarker('design'))], delegated(), { suspended: true, suspensions: [] }, labelledOnce).delegateMayDecide, false);
+  assert.equal(decisionItem(issue, [], delegated(), {}, labelledOnce).class, null);
+});
+
+test("an outsider's decision issue is never actionable for a delegate", () => {
+  const issue = { number: 8, title: 'Decision: y', body: '**Class:** design', user: { login: 'stranger' } };
+  const item = decisionItem(issue, [bot(renderClassMarker('design'))], delegated(), { suspended: false, suspensions: [] }, labelledOnce);
+  assert.equal(item.delegateMayDecide, false);
+  assert.deepEqual(item.deciders, []);
+  assert.equal(item.openedBy, 'stranger');
 });
 
 test('recurring council findings, stale PRs and branches, and counts', () => {
@@ -93,13 +103,18 @@ const gateInput = (cfg) => ({
   suspensions: [],
 });
 
-test('a PR item is the gate result, with whether a delegate may approve and why not', () => {
+test('a PR item is the gate result, with whether this delegate may approve and why not', () => {
   const pr = { number: 9, title: 'x', html_url: 'u', user: { login: 'owner' } };
-  const ok = prItem(pr, evaluateGate(gateInput(delegated())));
+  const ok = prItem(pr, evaluateGate(gateInput(delegated())), 'gardener');
   assert.equal(ok.gate, 'action_required');
   assert.equal(ok.delegateMayApprove, true);
   assert.deepEqual(ok.barriers, { gardener: [] });
-  const noGrant = prItem(pr, evaluateGate(gateInput(delegated({ approve: false }))));
+  // Another delegate may approve, but the session asking may not.
+  const two = { ...delegated({ approve: false }), delegates: [{ login: 'gardener', approve: false }, { login: 'helper', approve: true }] };
+  assert.equal(prItem(pr, evaluateGate(gateInput(two)), 'gardener').delegateMayApprove, false);
+  assert.equal(prItem(pr, evaluateGate(gateInput(two)), 'helper').delegateMayApprove, true);
+  assert.equal(prItem(pr, evaluateGate(gateInput(delegated())), 'owner').delegateMayApprove, false);
+  const noGrant = prItem(pr, evaluateGate(gateInput(delegated({ approve: false }))), 'gardener');
   assert.equal(noGrant.delegateMayApprove, false);
   assert.deepEqual(noGrant.barriers.gardener, ['gardener has no approve grant']);
 });
@@ -164,7 +179,7 @@ test('pipeline protect makes the delegate labels only for a project with a deleg
   assert.deepEqual(labelsFor({ admins: ['owner'] }), { 'decision-needed': 'fbca04', 'blocked:decision': 'fbca04', triage: 'd93f0b' });
   assert.deepEqual(labelsFor(null), labelsFor({}));
   const labels = Object.keys(labelsFor(delegated()));
-  for (const name of ['admin-needed', 'garden', 'complexity:high', 'complexity:low', 'pipeline:delegate-suspended', 'pipeline:delegate-touched']) {
+  for (const name of ['admin-needed', 'garden', 'complexity:high', 'complexity:low', 'pipeline:delegate-suspended', 'pipeline:delegate-touched', 'pipeline:delegate-approved', 'pipeline:delegate-rearmed']) {
     assert.ok(labels.includes(name), name);
     assert.ok(name in DELEGATE_LABELS, name);
   }

@@ -1,6 +1,6 @@
 // Deterministic tier calculation. AI can raise the result through the verdict
 // block but nothing can lower it.
-import { authority } from './authority.mjs';
+import { WORKFLOW_PATHS, authority } from './authority.mjs';
 import { readBlob } from './git.mjs';
 import { matchesAny, normalizePath } from './paths.mjs';
 
@@ -50,6 +50,8 @@ export function classify({
     scripts: [...scriptsChangedIn],
     symlinks: [],
     raised: Boolean(aiRaise),
+    // Only read when a delegate is configured. See WORKFLOW_PATHS.
+    workflows: paths.filter((path) => matchesAny(path, WORKFLOW_PATHS)),
   };
 
   if (!isAdmin && !isTrustedBot) {

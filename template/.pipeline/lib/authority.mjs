@@ -27,7 +27,13 @@ export const ADMIN_ONLY_FLOOR = [
 ];
 
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
-const FLAGS = ['approve', 'approveExternal', 'rearm', 'direct'];
+const FLAGS = ['approve', 'approveExternal', 'approveWorkflows', 'rearm', 'direct'];
+
+// A merged workflow with `checks: write` could forge pipeline/gate from main for
+// good, so workflows and the actions they use need an admin, unless a delegate's
+// grant sets `approveWorkflows`. .claude/agents/** and .claude/workflows/** stay
+// delegate-approvable; a project can add them to `tiers.adminOnlyPaths`.
+export const WORKFLOW_PATHS = ['.github/workflows/**', '.github/actions/**'];
 
 export const sameLogin = (a, b) =>
   typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
@@ -76,6 +82,7 @@ export function cleanDelegates(config, warn = () => {}) {
         login: entry.login,
         approve: entry.approve === true,
         approveExternal: entry.approveExternal === true,
+        approveWorkflows: entry.approveWorkflows === true,
         decide: [...(entry.decide ?? [])],
         rearm: entry.rearm === true,
         direct: entry.direct === true,

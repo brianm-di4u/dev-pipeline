@@ -113,6 +113,9 @@ export function delegateBarriers(auth, login, ctx = {}) {
     if (flags.symlinks?.length) reasons.push(`it adds a symlink or submodule: ${flags.symlinks.join(', ')}`);
     if (flags.scripts?.length) reasons.push(`it changes package.json scripts: ${flags.scripts.join(', ')}`);
     if (flags.external && !grant.approveExternal) reasons.push(`it is from an outside author: ${ctx.author ?? 'unknown'}`);
+    if (flags.workflows?.length && !grant.approveWorkflows) {
+      reasons.push(`it changes a workflow or action, and ${grant.login} has no approveWorkflows grant: ${flags.workflows.join(', ')}`);
+    }
   }
 
   if (sameLogin(ctx.author, grant.login)) reasons.push(`${grant.login} opened this PR`);
@@ -122,10 +125,10 @@ export function delegateBarriers(auth, login, ctx = {}) {
     reasons.push(`${grant.login} authored or committed to this PR`);
   }
   const touches = ctx.touches ?? [];
-  if (touches.length > 0) {
-    const kinds = [...new Set(touches.map((touch) => (touch.kind === 'body' ? 'edited its body' : 'pushed to it')))];
-    reasons.push(`a delegate ${kinds.join(' and ')}`);
-  }
+  const TOUCH_WORDS = { push: 'pushed to it', body: 'edited its body' };
+  const kinds = [...new Set(touches.map((touch) => TOUCH_WORDS[touch.kind]).filter(Boolean))];
+  if (kinds.length > 0) reasons.push(`a delegate ${kinds.join(' and ')}`);
+  if (touches.some((touch) => !TOUCH_WORDS[touch.kind])) reasons.push('the bot has marked it as touched by a delegate');
   if (ctx.suspended === undefined || !Array.isArray(ctx.suspensions)) {
     reasons.push('the gate could not read the delegate suspension state');
   } else if (ctx.suspended) {
@@ -188,26 +191,45 @@ const CLASS_MARKER_RE = /<!--\s*pipeline:decision-class\s+([a-z-]+)\s*-->/;
 
 export const renderClassMarker = (cls) => `<!-- pipeline:decision-class ${cls ?? 'unclassified'} -->`;
 
-export function recordedClass(comments) {
+// `events` is the issue's event list. With it, the marker must answer the issue's
+// first decision-needed labelling: a marker after a later labelling means an
+// earlier one was deleted, so the class counts as unclassified. Nobody can delete
+// an event.
+export function recordedClass(comments, events) {
   const bot = (comments ?? []).filter(isBotComment);
   const markers = bot
     .filter((comment) => CLASS_MARKER_RE.test(comment.body ?? ''))
     .sort((a, b) => time(a.created_at) - time(b.created_at) || (a.id ?? 0) - (b.id ?? 0));
   if (markers.length === 0) return null;
-  const cls = CLASS_MARKER_RE.exec(markers[0].body)[1];
-  const tampered = bot.some((comment) => comment.created_at !== comment.updated_at);
-  return { class: !tampered && DECISION_CLASSES.includes(cls) ? cls : null, at: markers[0].created_at };
+  const first = markers[0];
+  const cls = CLASS_MARKER_RE.exec(first.body)[1];
+  let tampered = bot.some((comment) => comment.created_at !== comment.updated_at);
+  if (Array.isArray(events)) {
+    const labelled = events
+      .filter((event) => event.event === 'labeled' && event.label?.name === 'decision-needed')
+      .map((event) => time(event.created_at))
+      .sort((a, b) => a - b);
+    const at = time(first.created_at);
+    if (labelled.length === 0 || at < labelled[0] || (labelled.length > 1 && at >= labelled[1])) tampered = true;
+  }
+  return { class: !tampered && DECISION_CLASSES.includes(cls) ? cls : null, at: first.created_at };
 }
 
 const DECIDE_RE = /^\/decide ([A-Za-z0-9._-]+)$/;
 
-// Why a delegate's /decide on this issue would not count.
+// Why a delegate's /decide on this issue would not count. `ctx.issueAuthor` and
+// `ctx.events` are the issue's author and event list; without them it can't count.
+// On a public repo anyone can open a decision issue, and the form labels it for
+// them, so a delegate decides only issues an admin opened.
 export function decisionProblems(comment, auth, comments, ctx = {}) {
   const who = toAuthority(auth);
   const grant = who.delegateOf(comment.user?.login);
   if (!grant) return [`${comment.user?.login} is not a delegate`];
-  const recorded = recordedClass(comments);
+  const recorded = recordedClass(comments, ctx.events);
   const reasons = [];
+  if (ctx.issueAuthor === undefined) reasons.push("the issue's author could not be read");
+  else if (!who.isAdmin(ctx.issueAuthor)) reasons.push(`the issue was opened by ${ctx.issueAuthor}, not an admin`);
+  if (!Array.isArray(ctx.events)) reasons.push("the issue's label history could not be read");
   if (!recorded?.class) {
     reasons.push('the bot has no class on record for this issue, so only an admin can decide it');
   } else {
@@ -227,22 +249,25 @@ export function decisionProblems(comment, auth, comments, ctx = {}) {
   return reasons;
 }
 
-// The first /decide that counts, as { option, comment, role, class }, or null. An
-// admin's always counts. A delegate's counts only for a class in its grant that
-// the bot recorded before the comment, and not while suspended.
+// The /decide that counts, as { option, comment, role, class }, or null. Any
+// admin's beats every delegate's, whatever the order; among admins the first
+// counts, as it always has. A delegate's counts only for a class in its grant that
+// the bot recorded before the comment, on an issue an admin opened, and not while
+// suspended.
 export function findDecision(comments, auth, ctx = {}) {
   const who = toAuthority(auth);
+  let delegated = null;
   for (const comment of comments) {
     const role = actorOf(comment, who);
     if (!role) continue;
     const match = DECIDE_RE.exec((comment.body ?? '').trim());
     if (!match) continue;
-    if (role === 'admin') return { option: match[1], comment, role, class: recordedClass(comments)?.class ?? null };
-    if (decisionProblems(comment, who, comments, ctx).length === 0) {
-      return { option: match[1], comment, role, class: recordedClass(comments).class };
+    if (role === 'admin') return { option: match[1], comment, role, class: recordedClass(comments, ctx.events)?.class ?? null };
+    if (!delegated && decisionProblems(comment, who, comments, ctx).length === 0) {
+      delegated = { option: match[1], comment, role, class: recordedClass(comments, ctx.events).class };
     }
   }
-  return null;
+  return delegated;
 }
 
 export const isDecideCommand = (comment) => DECIDE_RE.test((comment?.body ?? '').trim());
@@ -270,10 +295,10 @@ export function rearmProblems(comment, auth, comments, ctx = {}) {
   const ok = rearmGrant(comments);
   if (!ok) reasons.push('the bot did not offer a delegate re-arm for this trip, so only an admin can re-arm it');
   else if (!(time(ok.created_at) < time(comment.created_at))) reasons.push('it was posted before the bot offered a delegate re-arm');
-  if (ctx.suspended === undefined || !Array.isArray(ctx.suspensions)) {
+  // Judged by when it was posted, not by today's state: a re-arm made before a
+  // suspension stays made. The open window covers one posted during it.
+  if (!Array.isArray(ctx.suspensions)) {
     reasons.push('the delegate suspension state could not be read');
-  } else if (ctx.suspended) {
-    reasons.push('delegates are suspended');
   } else if (inWindow(comment.created_at, ctx.suspensions)) {
     reasons.push('it was posted while delegates were suspended');
   }

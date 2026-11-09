@@ -62,6 +62,16 @@ function Write-DelegateSettings([string]$Root, [securestring]$Secure, [string]$M
   $settingsPath = Join-Path $Root $SettingsRelative
   New-Item -ItemType Directory -Force (Split-Path $settingsPath) | Out-Null
 
+  # A tracked file would put the token in a commit, and a link would write it
+  # wherever the link points. Refuse both.
+  & git -C $Root ls-files --error-unmatch -- $SettingsRelative 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) { throw "$SettingsRelative is tracked by git in $Root. Untrack it first. Nothing was written." }
+  $LASTEXITCODE = 0
+  foreach ($path in @((Split-Path $settingsPath), $settingsPath)) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($item -and $item.LinkType) { throw "$path is a link ($($item.LinkType)). Nothing was written." }
+  }
+
   $settings = [ordered]@{}
   if (Test-Path $settingsPath) {
     $existing = Get-Content -Raw $settingsPath | ConvertFrom-Json -AsHashtable

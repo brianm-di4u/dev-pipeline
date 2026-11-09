@@ -6,9 +6,10 @@ import { findDecision, parseDecisionClass, parseVerdict, recordedClass } from '.
 const DAY = 24 * 60 * 60 * 1000;
 
 // One PR the gate holds, from the gate's own evaluation, so the inbox can't drift
-// from what the gate will accept.
-export function prItem(pr, result) {
+// from what the gate will accept. `login` is the session asking: may it approve?
+export function prItem(pr, result, login) {
   const delegate = result.delegate ?? null;
+  const mine = Object.entries(delegate?.barriers ?? {}).find(([name]) => name.toLowerCase() === (login ?? '').toLowerCase());
   return {
     number: pr.number,
     title: pr.title,
@@ -22,7 +23,7 @@ export function prItem(pr, result) {
     blockers: result.blockers,
     approved: result.approved,
     approvalRole: delegate?.approvalRole ?? null,
-    delegateMayApprove: Boolean(delegate?.mayApprove),
+    delegateMayApprove: Boolean(mine) && mine[1].length === 0,
     // Why each delegate couldn't approve it, and any of its approvals that didn't count.
     barriers: delegate?.barriers ?? {},
     refusals: delegate?.refusals ?? [],
@@ -41,13 +42,16 @@ export function parseOptions(body) {
   return options;
 }
 
-export function decisionItem(issue, comments, config, suspension = {}) {
+// `events` is the issue's event list. Only an issue an admin opened can be decided
+// by a delegate, so anyone else's is never actionable here.
+export function decisionItem(issue, comments, config, suspension = {}, events) {
   const auth = authority(config);
-  const recorded = recordedClass(comments);
+  const recorded = recordedClass(comments, events);
   const cls = recorded?.class ?? null;
   const bodyClass = parseDecisionClass(issue.body);
-  const deciders = cls ? auth.delegates.filter((grant) => grant.decide.includes(cls)).map((grant) => grant.login) : [];
-  const decision = findDecision(comments, auth, suspension);
+  const byAdmin = auth.isAdmin(issue.user?.login);
+  const deciders = cls && byAdmin ? auth.delegates.filter((grant) => grant.decide.includes(cls)).map((grant) => grant.login) : [];
+  const decision = findDecision(comments, auth, { ...suspension, issueAuthor: issue.user?.login ?? null, events });
   return {
     number: issue.number,
     title: issue.title,
@@ -57,6 +61,7 @@ export function decisionItem(issue, comments, config, suspension = {}) {
     // one rules; a mismatch is worth a second look.
     bodyClass,
     classMismatch: recorded !== null && bodyClass !== cls,
+    openedBy: issue.user?.login ?? null,
     options: parseOptions(issue.body),
     deciders,
     delegateMayDecide: deciders.length > 0 && suspension.suspended === false,

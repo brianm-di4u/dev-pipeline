@@ -7,22 +7,35 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { checkCommand, grantCovers } from '../template/.claude/hooks/guard.mjs';
+import { checkCommand, grantCovers, plainComment } from '../template/.claude/hooks/guard.mjs';
 import { tokenCheck } from '../bin/pipeline.mjs';
 
+// Contexts stand in for the network lookups: who the session is, and whether the
+// working tree names any delegate.
 const base = { currentBranch: () => 'feature/x', isOwnPr: () => true };
-const asDelegate = (allowed) => ({ ...base, delegateMayPost: (words) => words.every((w) => allowed.includes(w)) });
-const nobody = { ...base, delegateMayPost: () => false };
+const asDelegate = (allowed) => ({
+  ...base,
+  delegateMayPost: (words) => words.every((w) => allowed.includes(w)),
+  isDelegateSession: () => true,
+  localDelegates: () => true,
+});
+// A worker in a repo with delegates: the owner's login, so not a delegate.
+const worker = { ...base, delegateMayPost: () => false, isDelegateSession: () => false, localDelegates: () => true };
+// A repo with no delegates at all.
+const nobody = { ...base, delegateMayPost: () => false, isDelegateSession: () => false, localDelegates: () => false };
 
 const POSTS = [
   ['gh pr comment 5 --body "/approve abcdef012345"', ['approve']],
   ['gh issue comment 5 --body "/decide A"', ['decide']],
   ['gh issue comment 5 -b "/rearm"', ['rearm']],
-  ['gh api repos/o/r/issues/5/comments -f body="/approve abcdef012345"', ['approve']],
 ];
 
 test('every session that is not a delegate is still denied the command words', () => {
-  for (const [command] of POSTS) assert.match(checkCommand(command, nobody), /Only a human posts/);
+  for (const [command] of POSTS) {
+    assert.match(checkCommand(command, nobody), /Only a human posts/);
+    assert.match(checkCommand(command, worker), /Only a human posts/);
+  }
+  assert.match(checkCommand('gh api repos/o/r/issues/5/comments -f body="/approve abcdef012345"', nobody), /Only a human posts/);
 });
 
 test('a repo with no delegates denies the command words without any lookup', () => {
@@ -45,6 +58,36 @@ test('a delegate session may post exactly the commands its grant covers', () => 
   }
   assert.match(checkCommand('gh issue comment 5 --body "/decide A"', asDelegate(['approve'])), /Only a human posts/);
   assert.match(checkCommand('gh pr comment 5 --body "/approve abc /rearm"', asDelegate(['approve'])), /Only a human posts/);
+});
+
+// A command that drops the session's token first would make gh fall back to the
+// owner's keyring login, and post as the admin.
+for (const command of [
+  'unset GH_TOKEN; gh pr comment 5 --body "/approve abcdef012345"',
+  'env -u GH_TOKEN gh pr comment 5 --body "/approve abcdef012345"',
+  'export GH_TOKEN=; gh pr comment 5 --body "/approve abcdef012345"',
+  'Remove-Item Env:GH_TOKEN; gh pr comment 5 --body "/approve abcdef012345"',
+  '$env:GH_TOKEN=$null; gh pr comment 5 --body "/approve abcdef012345"',
+  'GH_HOST=x gh pr comment 5 --body "/approve abcdef012345"',
+  'GIT_CONFIG_COUNT=0 gh pr comment 5 --body "/approve abcdef012345"',
+  'gh pr comment 5 --body "/approve abcdef012345" && gh pr merge 5',
+  'gh pr comment 5 --body "/approve abcdef012345" | cat',
+  'echo $(gh pr comment 5 --body "/approve abcdef012345")',
+  'gh pr comment 5 --body "/approve abcdef012345"\ngh pr merge 5',
+  'gh api repos/o/r/issues/5/comments -f body="/approve abcdef012345"',
+  'gh issue create --title x --body "/decide A"',
+]) {
+  test(`a delegate's command word must be one plain comment: ${command}`, () => {
+    assert.match(checkCommand(command, asDelegate(['approve', 'decide', 'rearm'])) ?? '', /Only a human posts|credentials/);
+  });
+}
+
+test('a plain comment command is recognised', () => {
+  assert.equal(plainComment('gh pr comment 5 --body "/approve abcdef012345"'), true);
+  assert.equal(plainComment('  gh issue comment 7 -b "/decide A"  '), true);
+  assert.equal(plainComment('gh pr comment 5 --body-file body.md'), true);
+  assert.equal(plainComment('gh pr review 5 --body "/approve x"'), false);
+  assert.equal(plainComment('gh pr comment 5 --body "x"; ls'), false);
 });
 
 test('a delegate session gets no other exemption', () => {
@@ -88,11 +131,27 @@ for (const command of [
   'gh api -X PATCH repos/o/r/releases/12 -F draft=false',
   'gh api -X POST repos/o/r/actions/workflows/release.yml/dispatches -f ref=main',
 ]) {
-  test(`releases stay the owner's: ${command}`, () => {
+  test(`a delegate's session can't release: ${command}`, () => {
     assert.ok(checkCommand(command, asDelegate(['approve', 'decide', 'rearm'])), command);
-    assert.ok(checkCommand(command, nobody), command);
+    // Unchanged for everyone else.
+    assert.equal(checkCommand(command, nobody), null, command);
+    assert.equal(checkCommand(command, worker), null, command);
   });
 }
+
+test('only the workflow name decides a workflow run; a numeric id or id dispatch is denied to a delegate', () => {
+  const ctx = asDelegate(['approve']);
+  assert.equal(checkCommand('gh workflow run ci.yml --ref release/2.6', ctx), null);
+  assert.equal(checkCommand('gh workflow run --ref release/2.6 ci.yml', ctx), null);
+  assert.ok(checkCommand('gh workflow run 12345', ctx));
+  assert.ok(checkCommand('gh api -X POST repos/o/r/actions/workflows/12345/dispatches -f ref=main', ctx));
+  assert.equal(checkCommand('gh api -X POST repos/o/r/actions/workflows/ci.yml/dispatches -f ref=main', ctx), null);
+});
+
+test('if the session lookup fails, a release write is denied', () => {
+  const ctx = { ...base, delegateMayPost: () => false, localDelegates: () => true, isDelegateSession: () => true };
+  assert.ok(checkCommand('gh release create v1', ctx));
+});
 
 for (const command of ['gh release list', 'gh release view v1.0.0', 'gh release download v1.0.0', 'gh workflow run ci.yml', 'gh api repos/o/r/releases']) {
   test(`release reads are still allowed: ${command}`, () => {
@@ -106,8 +165,11 @@ for (const command of [
   'type C:\\GIS\\gwb-garden\\.claude\\Settings.Local.json',
   'git show HEAD:.claude/settings.local.json',
 ]) {
-  test(`the delegate's token file is a credential: ${command}`, () => {
-    assert.match(checkCommand(command, nobody), /credentials/);
+  test(`with delegates configured, the token file is a credential: ${command}`, () => {
+    assert.match(checkCommand(command, worker), /credentials/);
+    assert.match(checkCommand(command, asDelegate(['approve'])), /credentials/);
+    // A repo with no delegates is as before.
+    assert.equal(checkCommand(command, nobody), null);
   });
 }
 

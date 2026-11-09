@@ -74,7 +74,13 @@ export function pickCheck(checkRuns, names) {
 // marks a touch with a comment and a label. Anyone with write access can delete
 // the comment or remove the label, but nobody can delete the `labeled` event, so
 // that counts too.
-export async function delegateInputs(client, repo, number, comments) {
+//
+// The markers depend on a gate run, which the workflow's concurrency group can
+// cancel while it waits, so the gate also reads the record GitHub keeps itself:
+// pushes to the head branch from the repository activity log, and body edits from
+// the PR's edit history. Activity before the PR opened is the workflow relay rule,
+// and doesn't count. A commit with no linked GitHub user (author null) is no one's.
+export async function delegateInputs(client, repo, number, comments, { pr = null, config = null } = {}) {
   const commits = await client.list(`/repos/${repo}/pulls/${number}/commits?per_page=100`);
   const commitLogins = [
     ...new Set(commits.flatMap((commit) => [commit.author?.login, commit.committer?.login]).filter(Boolean)),
@@ -83,7 +89,37 @@ export async function delegateInputs(client, repo, number, comments) {
   const labelled = events
     .filter((event) => event.event === 'labeled' && event.label?.name === TOUCHED_LABEL && event.actor?.login === BOT)
     .map((event) => ({ kind: 'label', login: null, at: event.created_at }));
-  return { commitLogins, touches: [...touchMarkers(comments), ...labelled] };
+  const recorded = pr && config ? await recordedTouches(client, repo, number, pr, config) : [];
+  return { commitLogins, touches: [...touchMarkers(comments), ...labelled, ...recorded] };
+}
+
+const EDITS_QUERY =
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){userContentEdits(first:100){nodes{editedAt editor{login}}}}}}';
+
+async function recordedTouches(client, repo, number, pr, config) {
+  const auth = authority(config);
+  const opened = Date.parse(pr.created_at);
+  const touches = [];
+  if (pr.head?.repo?.full_name === repo) {
+    const ref = encodeURIComponent(`refs/heads/${pr.head.ref}`);
+    const activity = await client.list(`/repos/${repo}/activity?ref=${ref}&per_page=100`);
+    for (const entry of activity) {
+      const pushed = ['push', 'force_push'].includes(entry.activity_type);
+      if (pushed && Date.parse(entry.timestamp) > opened && auth.delegateOf(entry.actor?.login)) {
+        touches.push({ kind: 'push', login: entry.actor.login, at: entry.timestamp });
+      }
+    }
+  }
+  const [owner, name] = repo.split('/');
+  const response = await client.post('/graphql', { query: EDITS_QUERY, variables: { owner, name, number } });
+  const edits = response?.data?.repository?.pullRequest?.userContentEdits?.nodes;
+  if (!Array.isArray(edits)) throw new Error(`Could not read the edit history of #${number}`);
+  for (const change of edits) {
+    if (Date.parse(change.editedAt) > opened && auth.delegateOf(change.editor?.login)) {
+      touches.push({ kind: 'body', login: change.editor.login, at: change.editedAt });
+    }
+  }
+  return touches;
 }
 
 // pull_request_target carries who caused the event. A delegate that pushes to a
@@ -106,14 +142,24 @@ export async function markTouch(client, repo, number, touch) {
 }
 
 // A delegate's /decide counts only with the suspension state, which `ctx` carries.
+// With a delegate configured, it also reads each issue's author and events, which
+// a delegate's /decide needs.
 async function citedDecision(client, repo, config, body, ctx = {}) {
   const issues = [...(body ?? '').matchAll(/^Decision:\s*#(\d+)\s*$/gim)].map((m) => m[1]);
   if (issues.length === 0) return false;
+  const delegated = authority(config).delegates.length > 0;
   for (const issue of issues) {
     const comments = await client.list(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
-    if (!findDecision(comments, config, ctx)) return false;
+    const context = delegated ? { ...ctx, ...(await decisionContext(client, repo, issue)) } : ctx;
+    if (!findDecision(comments, config, context)) return false;
   }
   return true;
+}
+
+export async function decisionContext(client, repo, number) {
+  const issue = await client.get(`/repos/${repo}/issues/${number}`);
+  const events = await client.list(`/repos/${repo}/issues/${number}/events?per_page=100`);
+  return { issueAuthor: issue?.user?.login ?? null, events };
 }
 
 export async function gather({ client, repo, number, cwd, localEvidence = false }) {
@@ -152,7 +198,7 @@ export async function gather({ client, repo, number, cwd, localEvidence = false 
   const suspension = delegated ? { suspended: state.suspended, suspensions: state.suspensions } : {};
   const adrCited = await citedDecision(client, repo, config, pr.body, suspension);
   const comments = await client.list(`/repos/${repo}/issues/${number}/comments?per_page=100`);
-  const extra = delegated ? { ...(await delegateInputs(client, repo, number, comments)), ...suspension } : {};
+  const extra = delegated ? { ...(await delegateInputs(client, repo, number, comments, { pr, config })), ...suspension } : {};
 
   let verify;
   if (localEvidence) {
@@ -195,7 +241,9 @@ function readLocalEvidence(hash, cwd = process.cwd()) {
   return evidence.ok ? 'success' : 'failure';
 }
 
-export function checkRunBody(input, result, runId = process.env.GITHUB_RUN_ID) {
+// A re-publish from post-merge, audit or decisions is marked as one, so the
+// forged-gate check can tell it from a check that some other workflow wrote.
+export function checkRunBody(input, result, runId = process.env.GITHUB_RUN_ID, { republish = false } = {}) {
   const body = {
     name: CHECK_NAME,
     head_sha: input.pr.head,
@@ -206,12 +254,12 @@ export function checkRunBody(input, result, runId = process.env.GITHUB_RUN_ID) {
   if (result.conclusion) body.conclusion = result.conclusion;
   // With a delegate configured, stamp the check with this run, so post-merge can
   // tell it from one a pushed workflow wrote. See lib/delegates.mjs.
-  if (authority(input.config).delegates.length > 0 && runId) body.external_id = String(runId);
+  if (authority(input.config).delegates.length > 0 && runId) body.external_id = `${republish ? 'republish:' : ''}${runId}`;
   return body;
 }
 
-async function publish(client, repo, input, result) {
-  await client.post(`/repos/${repo}/check-runs`, checkRunBody(input, result));
+async function publish(client, repo, input, result, options) {
+  await client.post(`/repos/${repo}/check-runs`, checkRunBody(input, result, undefined, options));
 }
 
 // Evaluate and publish again, for when state outside the PR changed: a delegate
@@ -224,18 +272,23 @@ export async function reevaluate(client, repo, numbers, cwd = process.cwd()) {
     try {
       const input = await gather({ client, repo, number, cwd });
       const result = evaluateGate(input);
-      await publish(client, repo, input, result);
+      await publish(client, repo, input, result, { republish: true });
       results.push({ number, conclusion: result.conclusion ?? result.status });
     } catch (error) {
       console.error(error);
-      await client.post(`/repos/${repo}/check-runs`, {
-        name: CHECK_NAME,
-        head_sha: pr.head.sha,
-        status: 'completed',
-        conclusion: 'failure',
-        output: { title: 'Gate error', summary: 'The gate could not evaluate this PR. See the workflow log.' },
-      });
-      results.push({ number, conclusion: 'failure' });
+      // Without checks: write this fails too. Say so, rather than throw from here.
+      const runId = process.env.GITHUB_RUN_ID;
+      await client
+        .post(`/repos/${repo}/check-runs`, {
+          name: CHECK_NAME,
+          head_sha: pr.head.sha,
+          status: 'completed',
+          conclusion: 'failure',
+          ...(runId ? { external_id: `republish:${runId}` } : {}),
+          output: { title: 'Gate error', summary: 'The gate could not evaluate this PR. See the workflow log.' },
+        })
+        .catch((failure) => console.error(`Could not publish the gate error for #${number}: ${failure.message}`));
+      results.push({ number, conclusion: 'error' });
     }
   }
   return results;

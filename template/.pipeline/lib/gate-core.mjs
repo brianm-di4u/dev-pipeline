@@ -136,13 +136,29 @@ export function evaluateGate({
   if (approval) {
     approvedLine = `Approved by ${approval.comment.user.login}${approval.role === 'delegate' ? ', a delegate' : ''}.`;
   }
+  // With a delegate configured, the check records whose approval it relied on, so
+  // post-merge can label the merge then, rather than read comments that can change.
+  const marker = delegate ? ['', renderApprovalMarker(approval)] : [];
   return {
     ...base,
     status: 'completed',
     conclusion: 'success',
     title: `T${tier}: ready to merge`,
-    summary: render(base, [approvedLine]),
+    summary: render(base, [approvedLine, ...marker]),
   };
+}
+
+const APPROVAL_MARKER_RE = /<!--\s*pipeline:approval\s+role=(admin|delegate|none)(?:\s+login=([A-Za-z0-9-]+))?\s*-->/;
+
+export function renderApprovalMarker(approval) {
+  if (!approval) return '<!-- pipeline:approval role=none -->';
+  return `<!-- pipeline:approval role=${approval.role} login=${approval.comment.user.login} -->`;
+}
+
+// Whose approval a gate check relied on, from its summary, or null.
+export function approvalOfCheck(summary) {
+  const match = APPROVAL_MARKER_RE.exec(summary ?? '');
+  return match ? { role: match[1], login: match[2] ?? null } : null;
 }
 
 // Who can approve, said where the approver looks: the check summary.

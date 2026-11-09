@@ -367,6 +367,8 @@ export const DELEGATE_LABELS = {
   'complexity:low': 'c5def5',
   'pipeline:delegate-suspended': 'b60205',
   'pipeline:delegate-touched': 'd93f0b',
+  'pipeline:delegate-approved': 'c5def5',
+  'pipeline:delegate-rearmed': 'c5def5',
 };
 
 export function labelsFor(config) {

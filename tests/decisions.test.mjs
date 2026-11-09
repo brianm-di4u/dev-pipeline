@@ -34,7 +34,10 @@ const bot = (body, minute = 1, extra = {}) => ({
   ...extra,
 });
 const marker = (cls, minute = 1) => bot(`A decision is needed.\n\n${renderClassMarker(cls)}`, minute);
-const free = { suspended: false, suspensions: [] };
+// The issue was labelled decision-needed once, at minute 0, by the admin who opened it.
+const labelledAt = (...minutes) =>
+  minutes.map((minute) => ({ event: 'labeled', label: { name: 'decision-needed' }, actor: { login: 'owner' }, created_at: at(minute) }));
+const free = { suspended: false, suspensions: [], issueAuthor: 'owner', events: labelledAt(0) };
 
 test('the class is read from the issue form and from the skill line', () => {
   assert.equal(parseDecisionClass('### Class\n\ndesign\n\n### Context\n\nx'), 'design');
@@ -93,7 +96,12 @@ const VOID = [
   ['a marker posted after the comment', [marker('design', 20), user('/decide A', 'gardener', 10)], free, /before the bot recorded/],
   ['a suspension', [marker('design'), user('/decide A', 'gardener')], { suspended: true, suspensions: [] }, /suspended/],
   ['a comment inside a suspension window', [marker('design'), user('/decide A', 'gardener')], { suspended: false, suspensions: [{ from: at(5), to: at(15) }] }, /posted while/],
-  ['an unknown suspension state', [marker('design'), user('/decide A', 'gardener')], {}, /could not be read/],
+  ['an unknown suspension state', [marker('design'), user('/decide A', 'gardener')], { issueAuthor: 'owner', events: labelledAt(0) }, /could not be read/],
+  ['an issue an outsider opened', [marker('design'), user('/decide A', 'gardener')], { ...free, issueAuthor: 'stranger' }, /opened by stranger, not an admin/],
+  ['an issue the delegate opened', [marker('design'), user('/decide A', 'gardener')], { ...free, issueAuthor: 'gardener' }, /opened by gardener, not an admin/],
+  ['an unknown author', [marker('design'), user('/decide A', 'gardener')], { ...free, issueAuthor: undefined }, /author could not be read/],
+  ['no label history', [marker('design'), user('/decide A', 'gardener')], { ...free, events: undefined }, /label history could not be read/],
+  ['a marker from a later labelling, after the first was deleted', [marker('design', 5), user('/decide A', 'gardener')], { ...free, events: labelledAt(0, 4) }, /no class on record/],
   ['a tampered marker', [marker('design'), bot('x', 2, { updated_at: at(3) }), user('/decide A', 'gardener')], free, /no class on record/],
 ];
 
@@ -107,7 +115,20 @@ for (const [name, comments, ctx, why] of VOID) {
 
 test('council planning ignores suspension, and says the gate re-checks', () => {
   const comments = [marker('design'), user('/decide A', 'gardener')];
-  assert.equal(findDecision(comments, delegated(), { ignoreSuspension: true }).role, 'delegate');
+  assert.equal(findDecision(comments, delegated(), { ignoreSuspension: true, issueAuthor: 'owner', events: labelledAt(0) }).role, 'delegate');
+});
+
+test('an admin decide beats an earlier valid delegate decide; among admins the first counts, as before', () => {
+  const comments = [marker('design'), user('/decide B', 'gardener', 5), user('/decide A', 'owner', 10), user('/decide C', 'owner', 12)];
+  const decision = findDecision(comments, delegated(), free);
+  assert.deepEqual([decision.role, decision.option], ['admin', 'A']);
+});
+
+test('the class record holds with one labelling, and a relabel with no surviving marker means unclassified', () => {
+  assert.equal(recordedClass([marker('design', 1)], labelledAt(0)).class, 'design');
+  assert.equal(recordedClass([marker('design', 1)], labelledAt(0, 3)).class, 'design', 'the record answers the first labelling');
+  assert.equal(recordedClass([marker('design', 5)], labelledAt(0, 3)).class, null, 'a marker after the second labelling');
+  assert.equal(recordedClass([marker('design', 1)], []).class, null, 'no labelling at all');
 });
 
 test('an admin decides any class, and a void delegate decide never shadows it', () => {
@@ -122,11 +143,11 @@ test('an admin decides any class, and a void delegate decide never shadows it', 
 // monitor.mjs issue-event, with a fake GitHub.
 // ---------------------------------------------------------------------------
 
-function fakeClient(comments = []) {
+function fakeClient(comments = [], events = labelledAt(0)) {
   const calls = [];
   return {
     calls,
-    list: async () => comments,
+    list: async (path) => (path.includes('/events') ? events : comments),
     post: async (path, body) => {
       calls.push({ path, body });
       return {};
