@@ -23,6 +23,9 @@ export function evaluateGate({
   commitLogins,
   suspended,
   suspensions,
+  // Touch markers from comments and the bot's label events. Left out, they're
+  // read from the comments alone.
+  touches,
 }) {
   const { verdict, error: verdictError } = parseVerdict(pr.body);
   const { tier, reasons, flags } = classify({
@@ -75,7 +78,7 @@ export function evaluateGate({
   }
 
   const auth = authority(config);
-  const ctx = { flags, author: pr.author, commitLogins, touches: touchMarkers(comments), suspended, suspensions };
+  const ctx = { flags, author: pr.author, commitLogins, touches: touches ?? touchMarkers(comments), suspended, suspensions };
   const approval = findApproval(comments, auth, hash, ctx);
   const policy = config.merge?.[`t${tier}`] ?? 'human';
   const needsHuman = policy !== 'auto' || (breakerTripped && tier > 0);
@@ -88,6 +91,7 @@ export function evaluateGate({
   if (auth.delegates.length > 0) {
     const barriers = Object.fromEntries(auth.delegates.map((grant) => [grant.login, delegateBarriers(auth, grant.login, ctx)]));
     delegate = {
+      flags,
       approvalRole: approval?.role ?? null,
       mayApprove: Object.values(barriers).some((list) => list.length === 0),
       barriers,

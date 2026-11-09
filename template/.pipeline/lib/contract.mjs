@@ -247,6 +247,56 @@ export function findDecision(comments, auth, ctx = {}) {
 
 export const isDecideCommand = (comment) => DECIDE_RE.test((comment?.body ?? '').trim());
 
+// The bot grants a delegate one re-arm per breaker trip by posting this, unedited,
+// on the breaker issue.
+const REARM_OK_RE = /<!--\s*pipeline:delegate-rearm-ok\s*-->/;
+export const REARM_OK_MARKER = '<!-- pipeline:delegate-rearm-ok -->';
+
+export function rearmGrant(comments) {
+  return (
+    (comments ?? [])
+      .filter((comment) => isBotComment(comment) && comment.created_at === comment.updated_at && REARM_OK_RE.test(comment.body ?? ''))
+      .sort((a, b) => time(a.created_at) - time(b.created_at))[0] ?? null
+  );
+}
+
+// Why a delegate's /rearm on this breaker issue would not count.
+export function rearmProblems(comment, auth, comments, ctx = {}) {
+  const who = toAuthority(auth);
+  const grant = who.delegateOf(comment.user?.login);
+  if (!grant) return [`${comment.user?.login} is not a delegate`];
+  const reasons = [];
+  if (!grant.rearm) reasons.push(`${grant.login} has no rearm grant`);
+  const ok = rearmGrant(comments);
+  if (!ok) reasons.push('the bot did not offer a delegate re-arm for this trip, so only an admin can re-arm it');
+  else if (!(time(ok.created_at) < time(comment.created_at))) reasons.push('it was posted before the bot offered a delegate re-arm');
+  if (ctx.suspended === undefined || !Array.isArray(ctx.suspensions)) {
+    reasons.push('the delegate suspension state could not be read');
+  } else if (ctx.suspended) {
+    reasons.push('delegates are suspended');
+  } else if (inWindow(comment.created_at, ctx.suspensions)) {
+    reasons.push('it was posted while delegates were suspended');
+  }
+  return reasons;
+}
+
+export const isRearmCommand = (comment) => (comment?.body ?? '').trim() === '/rearm';
+export const isApproveCommand = (comment) => APPROVE_RE.test((comment?.body ?? '').trim());
+export const approvedHash = (comment) => APPROVE_RE.exec((comment?.body ?? '').trim())?.[1] ?? null;
+
+// The first /rearm on a breaker issue that counts, as { role, comment }, or null.
+// For the delegate-suspension issue, use hasRearm: only an admin lifts that.
+export function rearmBy(comments, auth, ctx = {}) {
+  const who = toAuthority(auth);
+  for (const comment of comments) {
+    const role = actorOf(comment, who);
+    if (!role || !isRearmCommand(comment)) continue;
+    if (role === 'admin') return { role, comment };
+    if (rearmProblems(comment, who, comments, ctx).length === 0) return { role, comment };
+  }
+  return null;
+}
+
 export function hasRearm(comments, auth) {
   const who = toAuthority(auth);
   return comments.some((comment) => actorOf(comment, who) === 'admin' && (comment.body ?? '').trim() === '/rearm');

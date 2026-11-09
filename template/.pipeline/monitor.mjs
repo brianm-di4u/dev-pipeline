@@ -11,21 +11,26 @@
 // account's actions wouldn't.
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { evaluateBreaker } from './lib/breaker.mjs';
+import { delegateMayRearm, evaluateBreaker } from './lib/breaker.mjs';
 import { authority } from './lib/authority.mjs';
 import { loadConfig } from './lib/config.mjs';
 import {
+  REARM_OK_MARKER,
   actorOf,
   decisionProblems,
   findDecision,
   hasRearm,
   isDecideCommand,
+  isRearmCommand,
   parseDecisionClass,
+  rearmBy,
+  rearmProblems,
   recordedClass,
   renderClassMarker,
 } from './lib/contract.mjs';
 import { buildDigest, renderDigest } from './lib/digest.mjs';
 import { tokenClient } from './lib/github.mjs';
+import { STATE_TITLES, readSuspension, stateIssues } from './lib/state.mjs';
 
 const BOT = 'github-actions[bot]';
 const encodedBot = encodeURIComponent(BOT);
@@ -55,19 +60,19 @@ async function openIssue(client, repo, label, title, body) {
   return client.post(`/repos/${repo}/issues`, { title, body, labels: [label] });
 }
 
-export async function checkBreaker(client, repo, config) {
-  const breakerIssues = (await botIssues(client, repo, 'pipeline:breaker', 'all')).sort((a, b) => b.number - a.number);
+export async function checkBreaker(client, repo, config, suspension = {}) {
+  const breakerIssues = (await stateIssues(client, repo, config, 'pipeline:breaker', 'all')).sort((a, b) => b.number - a.number);
   const latest = breakerIssues[0];
   if (latest?.state === 'open') return { tripped: true, alreadyOpen: true };
 
   const merges = (await client.list(`/repos/${repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100`)).filter(
     (pr) => pr.merged_at,
   );
-  const redIssues = await botIssues(client, repo, 'pipeline:main-red', 'all');
+  const redIssues = await stateIssues(client, repo, config, 'pipeline:main-red', 'all');
   const result = evaluateBreaker({ merges, redIssues, config, since: latest?.closed_at ?? null });
 
   if (result.tripped) {
-    await openIssue(
+    const created = await openIssue(
       client,
       repo,
       'pipeline:breaker',
@@ -83,15 +88,29 @@ export async function checkBreaker(client, repo, config) {
         'When you are satisfied, comment `/rearm` on this issue.',
       ].join('\n'),
     );
+    await offerDelegateRearm(client, repo, config, created, latest, result, suspension);
   }
   return result;
+}
+
+// Issue bodies are editable by collaborators, so the grant lives in a bot
+// comment, which the delegate's /rearm must follow.
+async function offerDelegateRearm(client, repo, config, created, previous, result, suspension) {
+  const auth = authority(config);
+  const rearmers = auth.delegates.filter((grant) => grant.rearm).map((grant) => grant.login);
+  if (rearmers.length === 0 || !created?.number) return;
+  const before = previous ? await client.list(`/repos/${repo}/issues/${previous.number}/comments?per_page=100`) : [];
+  if (!delegateMayRearm({ result, previousRearm: rearmBy(before, auth, suspension), config })) return;
+  await client.post(`/repos/${repo}/issues/${created.number}/comments`, {
+    body: `A delegate (${rearmers.join(', ')}) may re-arm this trip once, after posting the root cause here. A second trip within the window needs an admin.\n\n${REARM_OK_MARKER}`,
+  });
 }
 
 async function postMerge(client, repo, config, args) {
   const result = args[args.indexOf('--result') + 1];
   const sha = process.env.GITHUB_SHA;
   const runUrl = `${process.env.GITHUB_SERVER_URL}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-  const open = await botIssues(client, repo, 'pipeline:main-red');
+  const open = await stateIssues(client, repo, config, 'pipeline:main-red');
 
   if (result === 'success') {
     for (const issue of open) {
@@ -111,7 +130,8 @@ async function postMerge(client, repo, config, args) {
       ].join('\n'),
     );
   }
-  const breaker = await checkBreaker(client, repo, config);
+  const suspension = authority(config).delegates.length > 0 ? await readSuspension(client, repo, config) : {};
+  const breaker = await checkBreaker(client, repo, config, suspension);
   console.log(JSON.stringify({ result, breaker }));
 }
 
@@ -182,7 +202,27 @@ export async function issueEvent(client, repo, config, eventName, event, ctx = {
     await delegateDecision(client, repo, auth, issue, comment, ctx);
   }
 
-  if (labels.includes('pipeline:breaker') && issue.user?.login === BOT && hasRearm([comment], config.admins)) {
+  // With a delegate, a stripped label doesn't hide a breaker issue: its title still says what it is.
+  const isBreaker =
+    issue.user?.login === BOT &&
+    (labels.includes('pipeline:breaker') || (auth.delegates.length > 0 && issue.title?.startsWith(STATE_TITLES['pipeline:breaker'])));
+  if (isBreaker && !hasRearm([comment], config.admins) && actorOf(comment, auth) === 'delegate' && isRearmCommand(comment)) {
+    const list = await client.list(`/repos/${repo}/issues/${issue.number}/comments?per_page=100`);
+    const problems = rearmProblems(comment, auth, list, ctx);
+    if (problems.length > 0) {
+      await client.post(`/repos/${repo}/issues/${issue.number}/comments`, {
+        body: `The re-arm by ${comment.user.login} doesn't count: ${problems.join('; ')}.`,
+      });
+      return;
+    }
+    await client.post(`/repos/${repo}/issues/${issue.number}/comments`, {
+      body: `Re-armed by delegate ${comment.user.login}. T1 auto-merge is back on, and the failure count starts over. Another trip within the window needs an admin to re-arm.`,
+    });
+    await client.patch(`/repos/${repo}/issues/${issue.number}`, { state: 'closed' });
+    return;
+  }
+
+  if (isBreaker && hasRearm([comment], config.admins)) {
     await client.post(`/repos/${repo}/issues/${issue.number}/comments`, { body: 'Re-armed. T1 auto-merge is back on, and the failure count starts over.' });
     await client.patch(`/repos/${repo}/issues/${issue.number}`, { state: 'closed' });
   }
@@ -246,8 +286,12 @@ export async function main() {
   const config = loadConfig();
   const commands = {
     'post-merge': () => postMerge(client, repo, config, args),
-    'issue-event': () =>
-      issueEvent(client, repo, config, process.env.GITHUB_EVENT_NAME, JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'))),
+    'issue-event': async () => {
+      // A delegate's command needs the suspension state. Without a delegate, nothing more is read.
+      const ctx = authority(config).delegates.length > 0 ? await readSuspension(client, repo, config) : {};
+      const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+      await issueEvent(client, repo, config, process.env.GITHUB_EVENT_NAME, event, ctx);
+    },
     audit: () => audit(client, repo, config),
     digest: () => digest(client, repo, config),
   };
