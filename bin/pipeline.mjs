@@ -359,6 +359,28 @@ async function adoptProject({ positional, flags }) {
 }
 
 const AGENT_LABELS = { 'decision-needed': 'fbca04', 'blocked:decision': 'fbca04', triage: 'd93f0b' };
+// Only a project with a delegate in its config gets these.
+export const DELEGATE_LABELS = {
+  'admin-needed': 'b60205',
+  garden: '0e8a16',
+  'complexity:high': '5319e7',
+  'complexity:low': 'c5def5',
+  'pipeline:delegate-suspended': 'b60205',
+  'pipeline:delegate-touched': 'd93f0b',
+};
+
+export function labelsFor(config) {
+  const delegated = Array.isArray(config?.delegates) && config.delegates.length > 0;
+  return delegated ? { ...AGENT_LABELS, ...DELEGATE_LABELS } : AGENT_LABELS;
+}
+
+function localConfig(dir) {
+  try {
+    return JSON.parse(readFileSync(join(resolve(dir ?? '.'), 'pipeline.config.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
 
 function ghApi(args, input) {
   const result = spawnSync('gh', ['api', ...args], {
@@ -429,7 +451,7 @@ async function protect({ flags }) {
       // and the bot only makes the labels it applies itself.
       'Labels agents file under',
       () => {
-        for (const [name, color] of Object.entries(AGENT_LABELS)) {
+        for (const [name, color] of Object.entries(labelsFor(localConfig(flags.dir)))) {
           const made = ghApi(['-X', 'POST', `repos/${repo}/labels`, '-f', `name=${name}`, '-f', `color=${color}`]);
           if (!made.ok && !/already_exists/.test(made.stdout + made.stderr)) return made;
         }

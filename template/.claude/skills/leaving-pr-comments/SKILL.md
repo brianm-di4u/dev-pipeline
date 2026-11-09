@@ -5,7 +5,7 @@ description: Use whenever leaving comments on GitHub.
 
 # Leaving PR Comments
 
-You share an account with the human, so every comment you leave must show plainly that an agent wrote it. Prefix it with this note:
+When you share an account with the human, every comment you leave must show plainly that an agent wrote it. Prefix it with this note:
 
 ```md
 > [!NOTE]
@@ -15,6 +15,8 @@ Actual comment starts here.
 ```
 
 Use the verified public name of the model that wrote the comment, and the user's name or GitHub login. If the harness doesn't expose a model name, use the harness name. Don't guess.
+
+A delegate's session posts under its own account, so it leaves the note off: its login already says who wrote the comment.
 
 Before posting, check the entire comment, including quoted text and attachments, for secrets and private details.
 
@@ -29,6 +31,6 @@ Write the comment itself in a direct style:
 - Keep it concise, without filler, canned thanks, or status narration.
 - Distinguish verified facts from judgment.
 
-Never write a comment whose whole body is `/approve`, `/decide`, or `/rearm`. Those commands belong to the human.
+Never write a comment whose whole body is `/approve`, `/decide`, or `/rearm`. Those commands belong to the human, and to a delegate's own session within its grant, through the `gardener` skill.
 
 After posting, verify that GitHub returned the comment's URL. Resolve a review thread only after your response posted successfully.

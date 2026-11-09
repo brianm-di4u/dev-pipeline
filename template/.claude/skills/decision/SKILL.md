@@ -49,4 +49,4 @@ The admin answers with a comment containing only `/decide <option>`. If the proj
 2. Open a PR for it with a line reading `Decision: #<issue>`. The gate checks the issue carries their `/decide`, and a record with nothing else in it merges as T0. Plan its council with `council.mjs plan --decision <issue>`, so the council reviews it at the same tier.
 3. Close the issue, remove `blocked:decision`, and resume the parked work.
 
-Never post `/decide` yourself, and never treat anything other than the admin's exact comment, or a delegate's the bot recorded, as an answer.
+Never post `/decide` yourself, and never treat anything other than the admin's exact comment, or a delegate's the bot recorded, as an answer. A delegate's own session decides through the `gardener` skill, never this one.

@@ -47,6 +47,11 @@ const LABELS = {
   'pipeline:audit': 'b60205',
   'pipeline:digest': '0e8a16',
   'pipeline:delegate-suspended': 'b60205',
+  'pipeline:delegate-touched': 'd93f0b',
+  'admin-needed': 'b60205',
+  garden: '0e8a16',
+  'complexity:high': '5319e7',
+  'complexity:low': 'c5def5',
   'decision-needed': 'fbca04',
   decided: '0e8a16',
 };
@@ -327,6 +332,13 @@ export async function issueEvent(client, repo, config, eventName, event, ctx = {
           ? await decisionNotice(client, repo, config, auth, issue)
           : `${mentions(config)} a decision is needed here. ${ANSWER}`;
       await client.post(`/repos/${repo}/issues/${issue.number}/comments`, { body });
+    }
+    // A delegate escalates with an issue, because labelling a PR doesn't fire this
+    // workflow. The label is the admin's whole inbox, so it pings them.
+    if (event.action === 'labeled' && event.label?.name === 'admin-needed' && auth.delegates.length > 0) {
+      await client.post(`/repos/${repo}/issues/${issue.number}/comments`, {
+        body: `${mentions(config)} this needs you. The issue says what's waiting and what the delegate recommends. Nothing here has a default by timeout.`,
+      });
     }
     return;
   }

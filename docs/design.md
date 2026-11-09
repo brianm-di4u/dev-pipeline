@@ -28,6 +28,7 @@ What this template does, where each capability came from, what's been proven, an
 | Digest and metrics | `.pipeline/lib/digest.mjs`, `audit.yml` | Post's human-time metrics; commentary on wait time |
 | Reviewer evals | `evals/review/`, `.pipeline/eval.mjs` | Post; [hillclimbing guidance](https://claude.dev/blog/automating-eval-design-and-hillclimbing/) |
 | Autopilot | `autopilot` skill, `.pipeline/lib/queue.mjs` | Owner's operating model; [agent automations guidance](https://claude.dev/blog/building-effective-agent-automations/) |
+| Delegate approver ("gardener") | `.pipeline/lib/authority.mjs`, `.pipeline/garden.mjs`, `gardener` skill | Owner's operating model: a second account that holds part of the admin's authority |
 | Inception | `start-project` skill | Owner's own session brief |
 | License and acceptance checks | `.pipeline/check-licenses.mjs`, `check-acceptance.mjs` | Owner's own session brief |
 | Release, incident, retirement | `release`, `incident`, `retire` skills | Neither source. Needed for the full lifecycle |
@@ -62,6 +63,11 @@ What this template does, where each capability came from, what's been proven, an
 - **Council verdicts in CI are self-reported,** since no AI runs there. The gate checks that a verdict matches the change, not that the review truly happened. Red main, smoke checks, and evals are the independent signal.
 - **Private repos on Free have no enforcement at all,** which is why agents stop at ready there by default.
 - **The guard hook is a pattern match.** A script written to disk can evade it. The restricted token is what limits the damage.
+- **A delegate's `workflow` scope can forge the gate.** A pushed workflow can write a check named `pipeline/gate`. So a delegate's limits hold against mistakes and stale judgement, not against a deliberate bypass or a successful prompt injection. The forged-gate check after each merge catches a naive forgery after the fact, not before. Dropping the scope removes this, at the cost of workflow pushes staying with the owner.
+- **The opener sets a decision's class.** The bot records it when the label lands, so a delegate can't lower it by editing the body later, but a worker can mis-class at filing. The gardener re-judges every class and escalates when it disagrees.
+- **Markers in bot comments hold against mistakes, not deletion.** Anyone with write access can delete a comment, including the bot's. The delegate-touch marker is backed by a label event, which nobody can delete. The decision-class record and the re-arm offer are comments only.
+- **A delegate's token sits in a file its OS user can read.** Any process running as the owner's Windows user can read the delegate clone's `.claude/settings.local.json`. The template denies agents a `Read` of it and the guard blocks commands that name it, but a script can still read it. A separate OS user for the delegate is the fix.
+- **Releases stay the owner's by policy, not by token.** The guard blocks release commands, and `release.yml` runs only for the owner, but any account with write access can create a release through the API.
 
 ## Verification record
 
