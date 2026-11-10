@@ -93,7 +93,9 @@ test('a push or an edit by the delegate account is caught by login, or by id whe
 test('an id in a grant must be a GitHub user id, or the entry is dropped', () => {
   assert.equal(cleanDelegates(config({ id: 42 }))[0].id, 42);
   assert.equal(cleanDelegates(config())[0].id, null);
-  for (const id of [0, -1, '42', 4.2, true, null]) {
+  // null means absent: cleaning writes it, and the gate cleans the cleaned config again.
+  assert.equal(cleanDelegates(config({ id: null }))[0].id, null);
+  for (const id of [0, -1, '42', 4.2, true]) {
     const warnings = [];
     assert.deepEqual(cleanDelegates(config({ id }), (m) => warnings.push(m)), [], String(id));
     assert.match(warnings[0], /"id"/);

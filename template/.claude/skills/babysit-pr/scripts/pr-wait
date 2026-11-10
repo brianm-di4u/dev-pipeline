@@ -102,9 +102,10 @@ def _delegates(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         decide = entry.get("decide", [])
         if not isinstance(decide, list) or not all(c in DECISION_CLASSES for c in decide):
             continue
-        if "since" in entry and not (isinstance(entry["since"], str) and SINCE.match(entry["since"])):
+        # As in authority.mjs, null means absent.
+        if entry.get("since") is not None and not (isinstance(entry["since"], str) and SINCE.match(entry["since"])):
             continue
-        if "id" in entry and not (type(entry["id"]) is int and entry["id"] > 0):
+        if entry.get("id") is not None and not (type(entry["id"]) is int and entry["id"] > 0):
             continue
         kept[login] = entry
     return kept

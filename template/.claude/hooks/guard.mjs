@@ -294,8 +294,9 @@ export function grantCovers(config, login, words, id = null) {
   }
   const decide = grant.decide ?? [];
   if (!Array.isArray(decide) || !decide.every((cls) => DECISION_CLASSES.includes(cls))) return false;
-  if ('since' in grant && !(typeof grant.since === 'string' && SINCE.test(grant.since) && !Number.isNaN(Date.parse(grant.since)))) return false;
-  if ('id' in grant && !(Number.isSafeInteger(grant.id) && grant.id > 0 && grant.id === id)) return false;
+  // As in authority.mjs, null means absent.
+  if (grant.since != null && !(typeof grant.since === 'string' && SINCE.test(grant.since) && !Number.isNaN(Date.parse(grant.since)))) return false;
+  if (grant.id != null && !(Number.isSafeInteger(grant.id) && grant.id > 0 && grant.id === id)) return false;
   return words.every((word) => (word === 'approve' ? grant.approve === true : word === 'decide' ? decide.length > 0 : grant.rearm === true));
 }
 
