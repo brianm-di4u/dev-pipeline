@@ -51,7 +51,8 @@ const post = (path, body) => JSON.parse(sh('gh', ['api', '-X', 'POST', path, '--
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 const me = gh('api', 'user', '--jq', '.login');
-const repo = gh('repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner');
+// From the remote, not `gh repo view`, so the delegate side needs no GraphQL here.
+const repo = /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/.exec(git('remote', 'get-url', 'origin'))[1];
 const mainConfig = () => JSON.parse(Buffer.from(api(`repos/${repo}/contents/pipeline.config.json?ref=main`).content, 'base64').toString('utf8'));
 const same = (a, b) => a?.toLowerCase() === b?.toLowerCase();
 
@@ -124,7 +125,7 @@ function findRun() {
     (i) => !i.pull_request && i.title.startsWith(RUN_TITLE) && admins.some((a) => same(a, i.user.login)),
   );
   if (!issue) throw new Error(`no open "${RUN_TITLE}<id>" issue from an admin. Run setup first.`);
-  return { issue: issue.number, manifest: JSON.parse(MANIFEST_RE.exec(issue.body)[1]) };
+  return { issue: issue.number, created: issue.created_at, manifest: JSON.parse(MANIFEST_RE.exec(issue.body)[1]) };
 }
 const delegateReport = (number, delegate) =>
   comments(number)
@@ -217,15 +218,30 @@ function guardSays(command) {
   return result.status === 0 && result.stdout === '' ? 'allow' : 'deny';
 }
 
+// The delegate's token is a classic one with only public_repo and workflow, which
+// some gh commands' GraphQL queries need more than (gh pr edit asks for org data,
+// which needs read:org). So the delegate side uses REST for every write. The
+// only GraphQL it relies on is the session's own `gh issue|pr comment`, which the
+// guard requires for a command word.
+//
+// It is resumable: each step checks GitHub for its own result first, so a second
+// run picks up where the first stopped and never repeats a push or an issue.
+const patch = (path, body) => JSON.parse(sh('gh', ['api', '-X', 'PATCH', path, '--input', '-'], JSON.stringify(body)));
+const remoteHas = (branch) => run('git', ['ls-remote', '--exit-code', '--heads', 'origin', branch]).ok;
+const titled = (list, title) => list.find((item) => item.title === title && same(item.user?.login, me)) ?? null;
+
 async function delegateSide() {
   if (!same(me, EXPECTED)) {
     console.log(`SKIP delegate side: gh is ${me}, not ${EXPECTED}. Run it in a session opened in the delegate's clone.`);
     return;
   }
-  const { issue: runIssue, manifest } = findRun();
+  const { issue: runIssue, manifest, created } = findRun();
   const { prs, hashes, branches, id } = manifest;
+  // Start from a clean checkout of main, whatever a stopped run left behind.
+  git('checkout', '-q', 'main');
+  git('pull', '-q', '--ff-only', 'origin', 'main');
 
-  // D5: the guard, run here with this session's environment.
+  // D5: the guard, run here with this session's environment. Safe to repeat.
   const approve = `gh pr comment ${prs.D1} --body "/approve ${hashes.D1}"`;
   const guard = {
     plainApprove: guardSays(approve),
@@ -233,47 +249,86 @@ async function delegateSide() {
     viaApi: guardSays(`gh api repos/${repo}/issues/${prs.D1}/comments -f body="/approve ${hashes.D1}"`),
     release: guardSays('gh release create v9.9.9'),
   };
+  const done = [];
 
-  // D4b: push to a worker's branch. D4c: edit a worker's PR body.
-  git('fetch', '-q', 'origin', branches.D4b);
-  git('checkout', '-q', '-B', branches.D4b, `origin/${branches.D4b}`);
-  write(`src/auth/e2e-${id}-d4b-delegate.js`, 'export const pushedByDelegate = true;\n');
-  commitAndPush(`Delegate e2e ${id}: delegate push`, branches.D4b);
-  const body = api(`repos/${repo}/pulls/${prs.D4c}`).body;
-  const file = join(dir, '.git', 'e2e-body.md');
-  writeFileSync(file, `${body}\n\nEdited by the delegate.\n`);
-  gh('pr', 'edit', String(prs.D4c), '--body-file', file);
+  // D4b: push one commit to a worker's branch, once.
+  const pushed = api(`repos/${repo}/pulls/${prs.D4b}/commits?per_page=100`).some((c) => c.commit.message.startsWith(`Delegate e2e ${id}: delegate push`));
+  if (!pushed) {
+    git('fetch', '-q', 'origin', branches.D4b);
+    git('checkout', '-q', '-B', branches.D4b, `origin/${branches.D4b}`);
+    write(`src/auth/e2e-${id}-d4b-delegate.js`, 'export const pushedByDelegate = true;\n');
+    commitAndPush(`Delegate e2e ${id}: delegate push`, branches.D4b);
+    git('checkout', '-q', 'main');
+  } else done.push('D4b push');
 
-  // D4a: the delegate's own PR.
-  const own = `e2e/delegate-${id}-d4a`;
-  freshBranch(own);
-  write(`src/auth/e2e-${id}-d4a.js`, 'export const ownPr = true;\n');
-  commitAndPush(`Delegate e2e ${id}: delegate's own PR`, own);
-  const ownFull = await hashOf();
-  const ownHash = ownFull.slice(0, 12);
-  const ownPr = openPr(`Delegate e2e ${id}: D4a`, `${CONTRACT}${verdict(ownFull, 2)}`);
-  git('checkout', '-q', 'main');
+  // D4c: edit a worker's PR body through REST, once. The edit history records it.
+  const target = api(`repos/${repo}/pulls/${prs.D4c}`);
+  if (!target.body.includes('Edited by the delegate.')) patch(`repos/${repo}/pulls/${prs.D4c}`, { body: `${target.body}\n\nEdited by the delegate.\n` });
+  else done.push('D4c edit');
 
-  // D3c: a decision issue the delegate opened. D10: an escalation.
-  const ownDecision = openIssue(`Decision: delegate e2e ${id} opened by the delegate`, '**Class:** design\n\n- **A (recommended):** yes\n', ['decision-needed']);
-  const escalation = openIssue(`Admin needed: delegate e2e ${id}`, 'Delegate e2e: an escalation. Nothing is waiting on it.', ['admin-needed']);
+  // D4a: the delegate's own PR, once.
+  const ownTitle = `Delegate e2e ${id}: D4a`;
+  let own = titled(api(`repos/${repo}/pulls?state=open&per_page=100`), ownTitle);
+  let ownHash;
+  if (own) {
+    ownHash = /"changeHash":"([0-9a-f]{64})"/.exec(own.body)[1].slice(0, 12);
+    done.push('D4a PR');
+  } else {
+    const branch = `e2e/delegate-${id}-d4a`;
+    if (remoteHas(branch)) {
+      git('fetch', '-q', 'origin', branch);
+      git('checkout', '-q', '-B', branch, `origin/${branch}`);
+    } else {
+      freshBranch(branch);
+      write(`src/auth/e2e-${id}-d4a.js`, 'export const ownPr = true;\n');
+      commitAndPush(`Delegate e2e ${id}: delegate's own PR`, branch);
+    }
+    const full = await hashOf();
+    ownHash = full.slice(0, 12);
+    own = post(`repos/${repo}/pulls`, { title: ownTitle, head: branch, base: 'main', body: `${CONTRACT}${verdict(full, 2)}` });
+    git('checkout', '-q', 'main');
+  }
+
+  // D3c: a decision issue the delegate opened. D10: an escalation. Once each.
+  const issues = api(`repos/${repo}/issues?state=open&creator=${encodeURIComponent(me)}&per_page=100`);
+  const decisionTitle = `Decision: delegate e2e ${id} opened by the delegate`;
+  let ownDecision = titled(issues, decisionTitle)?.number;
+  if (ownDecision) done.push('D3c issue');
+  else ownDecision = post(`repos/${repo}/issues`, { title: decisionTitle, body: '**Class:** design\n\n- **A (recommended):** yes\n', labels: ['decision-needed'] }).number;
+  const escalationTitle = `Admin needed: delegate e2e ${id}`;
+  let escalation = titled(issues, escalationTitle)?.number;
+  if (escalation) done.push('D10 issue');
+  else escalation = post(`repos/${repo}/issues`, { title: escalationTitle, body: 'Delegate e2e: an escalation. Nothing is waiting on it.', labels: ['admin-needed'] }).number;
   await until(`a class record on #${ownDecision}`, () => botSaid(ownDecision, /pipeline:decision-class/));
 
-  // D7: try to promote a release. The guard denies the command in this session,
-  // so this calls the API directly, to prove release.yml refuses on its own.
-  const requested = new Date().toISOString();
-  const dispatch = run('gh', ['api', '-X', 'POST', `repos/${repo}/actions/workflows/release.yml/dispatches`, '-f', 'ref=main', '-f', `inputs[promote]=v0.0.0-e2e-${id}`]);
+  // D7: try to promote a release, once. The guard denies the command in this
+  // session, so this calls the API directly, to prove release.yml refuses on its own.
+  const earlier = api(`repos/${repo}/actions/workflows/release.yml/runs?per_page=20`).workflow_runs.find(
+    (r) => same(r.actor?.login, me) && r.created_at >= created,
+  );
+  let release;
+  if (earlier) {
+    release = { requested: earlier.created_at, dispatched: true, detail: '' };
+    done.push('D7 dispatch');
+  } else {
+    const requested = new Date().toISOString();
+    const dispatch = run('gh', ['api', '-X', 'POST', `repos/${repo}/actions/workflows/release.yml/dispatches`, '-f', 'ref=main', '-f', `inputs[promote]=v0.0.0-e2e-${id}`]);
+    release = { requested, dispatched: dispatch.ok, detail: dispatch.ok ? '' : dispatch.out.split('\n')[0] };
+  }
 
-  const report = { ownPr, ownHash, ownDecision, escalation, guard, release: { requested, dispatched: dispatch.ok, detail: dispatch.ok ? '' : dispatch.out.split('\n')[0] } };
-  post(`repos/${repo}/issues/${runIssue}/comments`, { body: `Delegate side of run ${id} done.\n\n<!-- pipeline:e2e-delegate ${JSON.stringify(report)} -->` });
+  if (!delegateReport(runIssue, me)) {
+    const report = { ownPr: own.number, ownHash, ownDecision, escalation, guard, release };
+    post(`repos/${repo}/issues/${runIssue}/comments`, { body: `Delegate side of run ${id} done.\n\n<!-- pipeline:e2e-delegate ${JSON.stringify(report)} -->` });
+  }
 
+  if (done.length > 0) console.log(`Already done in an earlier run, not repeated: ${done.join(', ')}.`);
   console.log(`Guard in this session: ${JSON.stringify(guard)}`);
   console.log('\nNow post each of these yourself, one command per tool call, exactly as written:\n');
   const lines = [
     approve,
     `gh pr comment ${prs.D2} --body "/approve ${hashes.D2}"`,
     ...(prs.D2b ? [`gh pr comment ${prs.D2b} --body "/approve ${hashes.D2b}"`] : []),
-    `gh pr comment ${ownPr} --body "/approve ${ownHash}"`,
+    `gh pr comment ${own.number} --body "/approve ${ownHash}"`,
     `gh pr comment ${prs.D4b} --body "/approve ${hashes.D4b}"`,
     `gh pr comment ${prs.D4c} --body "/approve ${hashes.D4c}"`,
     `gh issue comment ${manifest.issues.legal} --body "/decide A"`,
@@ -283,7 +338,7 @@ async function delegateSide() {
     `gh pr comment ${prs.D6b} --body "/approve ${hashes.D6b}"`,
   ];
   console.log(lines.join('\n'));
-  console.log('\nIf the guard denies the first one, stop: the session identity check failed. Report that.');
+  console.log('\nIf the guard denies the first one, or gh refuses it, stop and report the exact message.');
 }
 
 // ---------------------------------------------------------------------------
