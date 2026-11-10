@@ -15,6 +15,13 @@ on:
   workflow_run:
     workflows: [ci]
     types: [completed]
+  # With `freshness` in pipeline.config.json, a merge re-evaluates every open PR
+  # it could have made stale, and an hourly run catches any that a failed run
+  # missed. Without it, these runs find nothing to do.
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 * * * *'
   merge_group:
 
 permissions: {}
