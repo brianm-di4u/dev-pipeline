@@ -108,6 +108,23 @@ const gateAfter = (number, since, accept, what) =>
   });
 const green = (number, since = '1970-01-01T00:00:00Z') => gateAfter(number, since, (c) => c.conclusion === 'success', 'a green gate');
 
+// gate.yml's run for a push to main, once it finished. A PR whose freshness that
+// push didn't change isn't evaluated again, so "stays green" is read after it.
+const pushRunDone = (sha) =>
+  until(`the gate's push run for ${sha.slice(0, 7)}`, () => {
+    const done = api(`repos/${repo}/actions/workflows/gate.yml/runs?event=push&head_sha=${sha}&per_page=10`).workflow_runs.find((r) => r.status === 'completed');
+    if (done && done.conclusion !== 'success') throw new Error(`the gate's push run ${done.id} ended ${done.conclusion}`);
+    return done;
+  });
+async function staysGreen(number, merged) {
+  await pushRunDone(merged.merge_commit_sha);
+  const check = gateCheck(pull(number).head.sha);
+  if (check?.conclusion !== 'success') throw new Error(`#${number}'s gate is ${check?.conclusion ?? 'missing'}: ${check?.output?.title ?? ''}`);
+  const count = behindBy(number);
+  if (!(count > 0)) throw new Error(`#${number} isn't behind main`);
+  return count;
+}
+
 // Bring a PR up to date, then let GitHub merge it once the gate passes.
 async function mergeNow(number) {
   run('gh', ['pr', 'update-branch', String(number)]);
@@ -189,11 +206,9 @@ async function verdicts() {
   const moved = await mergeNow(mover.number);
 
   await checkAsync('F1', 'behind main with no overlap stays green', async () => {
-    for (const fix of [Y, W]) {
-      await green(fix.number, moved.merged_at);
-      if (!(behindBy(fix.number) > 0)) throw new Error(`#${fix.number} isn't behind main`);
-    }
-    return `#${Y.number} and #${W.number}, both behind main`;
+    const behind = [];
+    for (const fix of [Y, W]) behind.push(await staysGreen(fix.number, moved));
+    return `#${Y.number} and #${W.number} green, ${behind.join(' and ')} behind main after the push run`;
   });
   await checkAsync('F2', 'behind main with a shared file is held as "update the branch"', async () => {
     const held = await gateAfter(Z.number, moved.merged_at, isStale, 'a stale gate');
@@ -263,9 +278,7 @@ async function mergeBehind() {
   const moved = await mergeNow(mover.number);
 
   await checkAsync('F8', 'a PR behind main merges without an update', async () => {
-    await green(behind.number, moved.merged_at);
-    const count = behindBy(behind.number);
-    if (!(count > 0)) throw new Error("it isn't behind main");
+    const count = await staysGreen(behind.number, moved);
     const merged = run('gh', ['pr', 'merge', String(behind.number), '--squash']);
     if (!merged.ok) throw new Error(merged.out.split('\n')[0]);
     await until(`#${behind.number} to merge`, () => pull(behind.number).merged);
@@ -278,7 +291,7 @@ async function mergeBehind() {
     return merged.out.split('\n')[0];
   });
 
-  await cleanUp(id, [stale], [`src/behind-${id}`]);
+  await cleanUp(id, [stale, behind], [`src/behind-${id}`]);
   finish();
 }
 
