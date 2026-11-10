@@ -628,7 +628,7 @@ export function tokenCheck(response, config) {
     return {
       level: 'ok',
       name: 'Delegate token',
-      detail: `${login} is a delegate in pipeline.config.json, so a classic token is expected (scopes: ${classic || 'none reported'}). It should have only public_repo and workflow.`,
+      detail: `${login} is a delegate in pipeline.config.json, so a classic token is expected (scopes: ${classic || 'none reported'}). It should have only public_repo, workflow and read:org.`,
     };
   }
   if (classic && /\brepo\b/.test(classic)) {
