@@ -322,6 +322,8 @@ test("gate.yml's push run may re-publish on the default branch, and nowhere else
   const check = { app: { slug: 'github-actions' }, external_id: 'republish:42', completed_at: '2026-11-09T10:01:00Z' };
   const run = { path: '.github/workflows/gate.yml', event: 'push', head_branch: 'main', repository: { full_name: 'o/r' }, run_started_at: '2026-11-09T10:00:00Z', updated_at: '2026-11-09T10:02:00Z' };
   assert.deepEqual(gateRunProblems(check, run, 'o/r'), []);
+  // And from its hourly run, which catches a PR that a failed push run missed.
+  assert.deepEqual(gateRunProblems(check, { ...run, event: 'schedule' }, 'o/r'), []);
   assert.match(gateRunProblems(check, { ...run, head_branch: 'feature' }, 'o/r').join('; '), /ran on feature/);
   assert.match(gateRunProblems(check, { ...run, event: 'workflow_dispatch' }, 'o/r').join('; '), /re-publish came from a workflow_dispatch run/);
   // A push run's own, unmarked check still isn't a gate run.

@@ -6,8 +6,8 @@
 //   node .pipeline/gate.mjs fresh [--base R]    With `freshness` on: exit 1 if this branch needs an update
 //
 // In CI this runs from the default branch through pull_request_target,
-// issue_comment, workflow_run, and a push to the default branch (which
-// re-evaluates open PRs when `freshness` is on), so a PR can't change it. It fetches PR objects
+// issue_comment, workflow_run, and a push to the default branch or a schedule
+// (which re-evaluate open PRs when `freshness` is on), so a PR can't change it. It fetches PR objects
 // but never checks them out or runs them, and treats all PR text as data.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
@@ -423,9 +423,10 @@ async function runCi() {
     return 0;
   }
 
-  if (eventName === 'push') {
-    // gate.yml runs on a push to the default branch, from that branch.
-    if (event.ref !== `refs/heads/${event.repository?.default_branch}`) return 0;
+  if (eventName === 'push' || eventName === 'schedule') {
+    // gate.yml runs on a push to the default branch, and hourly, from that branch.
+    // The hourly run catches a PR that a failed push run left green.
+    if (eventName === 'push' && event.ref !== `refs/heads/${event.repository?.default_branch}`) return 0;
     const outcome = await mainMoved(client, repo, parseConfig(readFileSync('pipeline.config.json', 'utf8')));
     console.log(JSON.stringify(outcome));
     return outcome.reevaluated?.some((r) => r.conclusion === 'error') ? 1 : 0;
