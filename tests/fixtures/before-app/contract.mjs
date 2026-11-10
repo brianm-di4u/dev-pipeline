@@ -4,49 +4,7 @@
 // The PR contract: what a PR body must say, and the council verdict it carries.
 import { DECISION_CLASSES, sameLogin, toAuthority } from './authority.mjs';
 
-export const REQUIRED_SECTIONS = ['Testing', 'Risk', 'How to revert'];
-
-const stripComments = (text) => text.replace(/<!--[\s\S]*?-->/g, '');
-
-export function sectionBody(body, heading) {
-  const lines = stripComments(body ?? '').split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading}`.toLowerCase());
-  if (start === -1) return null;
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((line) => /^##\s/.test(line));
-  return (end === -1 ? rest : rest.slice(0, end)).join('\n').trim();
-}
-
-export function checkContract(body) {
-  const missing = REQUIRED_SECTIONS.filter((heading) => {
-    const content = sectionBody(body, heading);
-    return !content || /^(todo|tbd|n\/?a)\.?$/i.test(content);
-  });
-  return { ok: missing.length === 0, missing };
-}
-
-const VERDICT_RE = /<!--\s*pipeline:verdict\s*([\s\S]*?)-->/g;
-
-export function parseVerdict(body) {
-  const blocks = [...(body ?? '').matchAll(VERDICT_RE)];
-  if (blocks.length === 0) return { verdict: null, error: 'missing' };
-  try {
-    const verdict = JSON.parse(blocks.at(-1)[1]);
-    const valid =
-      typeof verdict.changeHash === 'string' &&
-      Number.isInteger(verdict.tier) &&
-      Number.isInteger(verdict.rounds) &&
-      Number.isInteger(verdict.open?.blocker) &&
-      Number.isInteger(verdict.open?.should);
-    return valid ? { verdict, error: null } : { verdict: null, error: 'malformed' };
-  } catch {
-    return { verdict: null, error: 'malformed' };
-  }
-}
-
-export function renderVerdict(verdict) {
-  return `<!-- pipeline:verdict\n${JSON.stringify(verdict)}\n-->`;
-}
+export { REQUIRED_SECTIONS, checkContract, parseDecisionClass, parseVerdict, renderVerdict, sectionBody } from '../../../template/.pipeline/lib/contract.mjs';
 
 // Commands count only as a comment's entire body, from an admin or a delegate,
 // never edited, never from a Bot account. A comment that quotes a command
@@ -199,20 +157,6 @@ export function delegateRefusals(comments, auth, hash, ctx = {}) {
     .filter((refusal) => refusal.reasons.length > 0);
 }
 
-// A decision request's class, from its body: the issue form renders
-// `### Class\n\n<class>`, and the decision skill writes `**Class:** <class>`.
-// Anything ambiguous or unknown is null: unclassified, so only an admin decides.
-export function parseDecisionClass(body) {
-  const text = (body ?? '').replace(/\r\n?/g, '\n').replace(/<!--[\s\S]*?-->/g, '');
-  const found = new Set();
-  for (const match of text.matchAll(/^###[ \t]*Class[ \t]*\n+[ \t]*(\S[^\n]*?)[ \t]*$/gim)) found.add(match[1].toLowerCase());
-  for (const match of text.matchAll(/^[ \t]*(?:[-*][ \t]+)?\*\*Class:\*\*[ \t]*(\S[^\n]*?)[ \t]*$/gim)) {
-    found.add(match[1].toLowerCase());
-  }
-  if (found.size !== 1) return null;
-  const [cls] = found;
-  return DECISION_CLASSES.includes(cls) ? cls : null;
-}
 
 // The bot records the class when the issue is labelled, so nobody can lower it
 // later by editing the body. The earliest unedited bot marker wins. If any of the
