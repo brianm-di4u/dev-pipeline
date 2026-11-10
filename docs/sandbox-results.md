@@ -65,3 +65,22 @@ Running against real GitHub found things unit tests couldn't:
 - **Git Bash rewrites a leading slash** in arguments, turning `/approve` into a path. That's harmless for the gate, but it's why tests post comments as JSON.
 - **GitHub needs time after a visibility change.** It refuses another change, refuses settings changes, and even disables git access for a while. `pipeline protect` and the test now retry.
 - **A tag ruleset can't let the release workflow through on a personal account.** GitHub rejects GitHub Actions as a bypass actor with a 422, saying it must be part of the ruleset's source or owner organization. So a personal repo can't reserve version tags for a workflow. Instead, a project with a release to protect can trigger it by `workflow_dispatch`, which the restricted token can't do, and a tag pushed by an agent then starts nothing.
+
+## Delegate approver run
+
+`tests/e2e/delegate.mjs` proves the delegate approver against the sandbox from GitHub's own state. The delegate's token stays in the delegate's own clone, so no process holds both identities. The admin side and the delegate side are separate runs that coordinate only through GitHub: a run issue the admin side opens, and a report comment the delegate side leaves on it. Neither script posts an approve, decide or rearm command. The admin posts the admin's commands by hand, and the delegate's session posts the delegate's, so each one passes through the real guard hook.
+
+The delegate's session must be opened in a clone of the sandbox itself, not of another project, because Claude Code loads the guard hook from the project the session was opened in. A clone of a project still on the old guard denies every command word.
+
+| Step | Who | What | Proves |
+|---|---|---|---|
+| 1 | Delegate session (any delegate clone) | Clone the sandbox to `C:\GIS Workbench\sandbox-garden` and set its git identity to the delegate. Read the workflow changes in the update branch, then push it unchanged before any PR exists. | The workflow relay rule. The agent token can't push workflows; the delegate's can. |
+| 2 | Agent (admin side) | Confirm the pushed head, open the PR, and turn on auto-merge. | With no `delegates` on main, the gate holds it at T2 as before. |
+| 3 | Owner | `/approve <hash>` on that PR. | Only an admin approves a change to an admin-only path. |
+| 4 | Owner | Run `tools/setup-delegate.ps1 -Clone "C:\GIS Workbench\sandbox-garden"`, and open the folder in Claude Code once to accept trust. Steps 1 to 3 can run alongside. | Nothing yet. It gives the delegate a session with the new guard. |
+| 5 | Agent | `node tests/e2e/delegate.mjs setup <clone>` | Opens the fixtures and the run issue. |
+| 6 | Delegate session in `sandbox-garden` | `git pull`, then `node tests/e2e/delegate.mjs delegate .`. Then post each printed command with `gh`, one per tool call. | The guard's identity lookup in a real delegate session. |
+| 7 | Agent | `node tests/e2e/delegate.mjs verify <clone>` | Approvals, refusals, decisions, touches, escalation, the release refusal, and that the Actions token reads the activity log and edit history. Then it merges and reverts two delegate-approved PRs until delegates are suspended. |
+| 8 | Delegate session | `gh issue comment <suspension> --body "/rearm"` | A delegate can't lift a suspension. |
+| 9 | Owner | `/rearm` on the suspension issue. | Only an admin lifts it. |
+| 10 | Agent | `node tests/e2e/delegate.mjs lifted <clone>` | The lift re-runs the gate for the PRs it held. It then closes every fixture. |
