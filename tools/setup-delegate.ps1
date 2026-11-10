@@ -109,14 +109,15 @@ function Invoke-Setup {
   $root = (Resolve-Path $Clone).Path
   Get-GitPath $root 'info/exclude' | Out-Null
   Write-Host "This writes the delegate's token into $root\.claude\settings.local.json."
-  Write-Host 'Use a classic token with only the public_repo and workflow scopes, made on the delegate account.'
+  Write-Host 'Use a classic token with only the public_repo, workflow and read:org scopes, made on the delegate account.'
+  Write-Host 'Make it in a private window or a separate browser profile, and sign out of the delegate afterwards.'
   $secure = Read-Host -AsSecureString -Prompt 'Delegate token (input is hidden)'
   if ($secure.Length -eq 0) { throw 'No token given. Nothing was written.' }
 
   $identity = Get-TokenIdentity $secure
   Write-Host "The token belongs to $($identity.Login), with scopes: $($identity.Scopes)"
   if ($identity.Scopes -match '(^|,\s*)repo(\s*,|$)' -or $identity.Scopes -match 'admin:|delete_repo') {
-    Write-Warning 'That token has more than public_repo and workflow. Consider making a narrower one.'
+    Write-Warning 'That token has more than public_repo, workflow and read:org. Consider making a narrower one.'
   }
   $answer = Read-Host "Write it for $($identity.Login)? (y/N)"
   if ($answer -notmatch '^(y|yes)$') { Write-Host 'Nothing was written.'; return }

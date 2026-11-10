@@ -38,6 +38,39 @@ const RELEASE_API = /(^|\/)(releases\b|actions\/workflows\/([^/\s]*release[^/\s]
 const PLAIN_COMMENT = /^gh(?:\.exe)?\s+(?:issue|pr)\s+comment\s/i;
 const SHELL_META = /[;&|`$<>()\r\n]/;
 
+// Every repo a gh comment command names: each --repo or -R, in any form gh
+// accepts, each issue or PR URL, and GH_REPO in the environment. None means the
+// working directory's own repo. All of them are returned, not the first, because
+// gh uses the last flag, and a URL can name a repo the flag doesn't.
+export function targetRepos(tokens, env = process.env) {
+  const repos = [];
+  const add = (value) => {
+    const repo = (value ?? '')
+      .replace(/["']/g, '')
+      .replace(/^https?:\/\//i, '')
+      .replace(/^github\.com\//i, '')
+      .replace(/\.git$/i, '')
+      .replace(/\/+$/, '');
+    // A flag with no value still names something, so it can't pass as the working repo.
+    repos.push(repo || '(missing)');
+  };
+  tokens.forEach((token, i) => {
+    if (token === '--repo') return add(tokens[i + 1]);
+    if (token.startsWith('--repo=')) return add(token.slice('--repo='.length));
+    // A one-letter cluster: -R, -Rowner/repo, -R=owner/repo, or -eR owner/repo.
+    // A letter before R that takes a value, -b or -F, takes the rest instead.
+    const short = /^-([A-Za-z]*?)R(.*)$/.exec(token);
+    if (short && !/[bF]/.test(short[1])) return add(short[2] ? short[2].replace(/^=/, '') : tokens[i + 1]);
+    for (const url of token.matchAll(/github\.com\/([^/\s]+\/[^/\s]+)\/(?:pull|issues)\/\d+/gi)) add(url[1]);
+  });
+  if (env.GH_REPO) add(env.GH_REPO);
+  return repos;
+}
+
+// Whether every repo a command names is `repo`. Naming none means the working repo.
+export const aimedOnlyAt = (targets, repo) =>
+  targets.every((target) => typeof target === 'string' && typeof repo === 'string' && target.toLowerCase() === repo.toLowerCase());
+
 export function plainComment(command) {
   const text = (command ?? '').trim();
   return PLAIN_COMMENT.test(text) && !SHELL_META.test(text);
@@ -58,6 +91,8 @@ const GIT_BASH_COMMAND =
 const RELEASE_WRITES = ['create', 'edit', 'delete', 'delete-asset', 'upload'];
 const DECISION_CLASSES = ['design', 'determination', 'legal', 'security', 'major'];
 const LOOKUP_TIMEOUT_MS = 4000;
+// As in .pipeline/lib/authority.mjs. The gate checks a command's time against it.
+const SINCE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
 const ADMIN_ESCAPE = /\bPIPELINE_ADMIN_PUSH\b/;
 
@@ -164,7 +199,7 @@ function checkGh(tokens, segment, context) {
     const text = `${segment}\n${bodyFileText(tokens, context.cwd)}`;
     if (COMMAND_WORD.test(text)) {
       const words = [...new Set([...text.matchAll(COMMAND_WORDS)].map((match) => match[1]))];
-      if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd)) {
+      if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd, targetRepos(tokens))) {
         return 'Only a human posts /approve, /decide, or /rearm. Reword it, for example "the approve command".';
       }
       if (context.gitBash) return GIT_BASH_COMMAND;
@@ -258,6 +293,7 @@ export function grantCovers(config, login, words) {
   }
   const decide = grant.decide ?? [];
   if (!Array.isArray(decide) || !decide.every((cls) => DECISION_CLASSES.includes(cls))) return false;
+  if ('since' in grant && !(typeof grant.since === 'string' && SINCE.test(grant.since) && !Number.isNaN(Date.parse(grant.since)))) return false;
   return words.every((word) => (word === 'approve' ? grant.approve === true : word === 'decide' ? decide.length > 0 : grant.rearm === true));
 }
 
@@ -285,16 +321,19 @@ function sessionConfig(cwd) {
     ['api', `repos/${repo.nameWithOwner}/contents/pipeline.config.json?ref=${repo.defaultBranchRef.name}`, '--jq', '.content'],
     cwd,
   );
-  return { login, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
+  return { login, repo: repo.nameWithOwner, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
 }
 
 // A delegate's own session may post the commands its grant covers. Any error or
 // timeout denies. A repo with no delegates in its config is never looked up, so
 // it denies at once, as it always has.
-function defaultDelegateMayPost(words, cwd) {
+// The grant comes from the working directory's repo, so it only covers commands
+// aimed at that repo: unless every repo the command names is that repo, it is denied.
+function defaultDelegateMayPost(words, cwd, targets = []) {
   if (!defaultLocalDelegates(cwd)) return false;
   try {
-    const { login, config } = sessionConfig(cwd);
+    const { login, repo, config } = sessionConfig(cwd);
+    if (!aimedOnlyAt(targets, repo)) return false;
     return grantCovers(config, login, words);
   } catch {
     return false;
