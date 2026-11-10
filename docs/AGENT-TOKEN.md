@@ -87,7 +87,12 @@ A delegate is a second GitHub account that may post some of the approval command
 Its session must act as that account, so it gets a token of its own, in its own clone, and never your agent token.
 
 1. **Create the account,** such as `gwb-gardener`, with its own email and two-factor authentication. Invite it as a collaborator on the target repo and on the sandbox repo used for `tests/e2e/delegate.mjs`, and nothing else. Accept both invitations as the delegate.
-2. **Create a classic token** on the delegate account, at [github.com/settings/tokens/new](https://github.com/settings/tokens/new), with only the `public_repo` and `workflow` scopes. Fine-grained tokens don't work on a repo the account is only a collaborator on, which is why it's classic. `workflow` lets the delegate relay a workflow branch an agent can't push. That scope can also forge the gate, which [design.md](design.md) lists as an accepted risk.
+
+   **Sign in as the delegate only in a private window or a separate browser profile, and sign out when you're done.** Everything you do in a browser signed in as the delegate is the delegate's, including an `/approve` you meant as your own. GitHub counts it as the delegate's command, and the bot records it as one. If that happened while no delegate was configured, see `since` below.
+2. **Create a classic token** on the delegate account, at [github.com/settings/tokens/new](https://github.com/settings/tokens/new), with only the `public_repo`, `workflow` and `read:org` scopes. Do it in that private window too.
+   - **Classic,** because fine-grained tokens don't work on a repo the account is only a collaborator on.
+   - **`workflow`** lets the delegate relay a workflow branch an agent can't push. That scope can also forge the gate, which [design.md](design.md) lists as an accepted risk.
+   - **`read:org`** is there because some `gh` commands, such as `gh pr edit` and the default `gh pr view`, ask GitHub for team and organization fields and fail without it. It reads; it can't change anything.
 3. **Clone the repo for the delegate,** for example to `C:\GIS Workbench\gwb-garden`, and set that clone's git identity to the delegate account.
 4. **Run the setup script from your own terminal,** not from an agent:
 
@@ -99,6 +104,8 @@ Its session must act as that account, so it gets a token of its own, in its own 
 5. **Check it.** From your own terminal, `git -C <clone> check-ignore -v .claude/settings.local.json` should name `.git/info/exclude`. Agent sessions can't run that one, because the guard denies any command that names the file. Then open the clone in Claude Code once, accept the trust prompt, and in that session `gh api user --jq .login` should print the delegate's login, such as `gwb-gardener`. `pipeline doctor` reports the classic token as expected for a delegate.
 
 The guard lets a session post `/approve`, `/decide`, or `/rearm` only when `gh api user` names a delegate in the default branch's config, and only the commands its grant covers. If the local settings' `GH_TOKEN` doesn't reach the hook, `gh` falls back to your keyring login, which isn't a delegate, so the guard denies. That is the safe failure.
+
+**`since` keeps earlier commands out.** A delegate's command counts only if it was posted at or after its entry's `since`, an ISO date and time such as `"2026-11-10T00:00:00Z"`. Without `since`, a command the account posted before it was configured, for example from a browser left signed in as the delegate, starts counting once the `delegates` key lands, if its PR is still open at the same change. Set `since` to the time you add the entry.
 
 The token sits in plain text in that file, which any process running as your Windows user can read. The template's settings deny agent sessions a `Read` of `//**/.claude/settings.local.json`, which matches that file anywhere on the machine, including a sibling clone. Claude Code applies a `Read` deny to Grep, Glob, and the shell commands it recognizes, such as `cat`, on a best-effort basis, and the guard denies any shell command that names the file. Neither stops a script that reads it indirectly. Moving the delegate to its own Windows user is the stronger fix.
 

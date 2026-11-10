@@ -38,6 +38,19 @@ const RELEASE_API = /(^|\/)(releases\b|actions\/workflows\/([^/\s]*release[^/\s]
 const PLAIN_COMMENT = /^gh(?:\.exe)?\s+(?:issue|pr)\s+comment\s/i;
 const SHELL_META = /[;&|`$<>()\r\n]/;
 
+// The repo a gh command names, from --repo or -R, or from an issue or PR URL, or
+// null when it means the working directory's own repo. GH_REPO in the
+// environment also counts.
+export function targetRepo(tokens, env = process.env) {
+  const flag = tokens.findIndex((token) => token === '--repo' || token === '-R');
+  if (flag !== -1 && tokens[flag + 1]) return tokens[flag + 1].replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/, '');
+  const inline = tokens.find((token) => /^--repo=/.test(token));
+  if (inline) return inline.slice('--repo='.length);
+  const url = tokens.map((token) => /github\.com\/([^/\s]+\/[^/\s]+)\/(?:pull|issues)\/\d+/i.exec(token)).find(Boolean);
+  if (url) return url[1];
+  return env.GH_REPO || null;
+}
+
 export function plainComment(command) {
   const text = (command ?? '').trim();
   return PLAIN_COMMENT.test(text) && !SHELL_META.test(text);
@@ -49,6 +62,8 @@ const COMMAND_WORDS = /(?:^|[\s"'=`])\/(approve|decide|rearm)\b/g;
 const RELEASE_WRITES = ['create', 'edit', 'delete', 'delete-asset', 'upload'];
 const DECISION_CLASSES = ['design', 'determination', 'legal', 'security', 'major'];
 const LOOKUP_TIMEOUT_MS = 4000;
+// As in .pipeline/lib/authority.mjs. The gate checks a command's time against it.
+const SINCE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
 const ADMIN_ESCAPE = /\bPIPELINE_ADMIN_PUSH\b/;
 
@@ -155,7 +170,7 @@ function checkGh(tokens, segment, context) {
     const text = `${segment}\n${bodyFileText(tokens, context.cwd)}`;
     if (COMMAND_WORD.test(text)) {
       const words = [...new Set([...text.matchAll(COMMAND_WORDS)].map((match) => match[1]))];
-      if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd)) {
+      if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd, targetRepo(tokens))) {
         return 'Only a human posts /approve, /decide, or /rearm. Reword it, for example "the approve command".';
       }
     }
@@ -247,6 +262,7 @@ export function grantCovers(config, login, words) {
   }
   const decide = grant.decide ?? [];
   if (!Array.isArray(decide) || !decide.every((cls) => DECISION_CLASSES.includes(cls))) return false;
+  if ('since' in grant && !(typeof grant.since === 'string' && SINCE.test(grant.since) && !Number.isNaN(Date.parse(grant.since)))) return false;
   return words.every((word) => (word === 'approve' ? grant.approve === true : word === 'decide' ? decide.length > 0 : grant.rearm === true));
 }
 
@@ -274,16 +290,19 @@ function sessionConfig(cwd) {
     ['api', `repos/${repo.nameWithOwner}/contents/pipeline.config.json?ref=${repo.defaultBranchRef.name}`, '--jq', '.content'],
     cwd,
   );
-  return { login, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
+  return { login, repo: repo.nameWithOwner, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
 }
 
 // A delegate's own session may post the commands its grant covers. Any error or
 // timeout denies. A repo with no delegates in its config is never looked up, so
 // it denies at once, as it always has.
-function defaultDelegateMayPost(words, cwd) {
+// The grant comes from the working directory's repo, so it only covers commands
+// aimed at that repo: a command naming another repo is denied.
+function defaultDelegateMayPost(words, cwd, target = null) {
   if (!defaultLocalDelegates(cwd)) return false;
   try {
-    const { login, config } = sessionConfig(cwd);
+    const { login, repo, config } = sessionConfig(cwd);
+    if (target && !sameLogin(target, repo)) return false;
     return grantCovers(config, login, words);
   } catch {
     return false;

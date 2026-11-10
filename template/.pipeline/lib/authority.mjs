@@ -40,6 +40,12 @@ export const sameLogin = (a, b) =>
 
 const isStringList = (value) => Array.isArray(value) && value.every((item) => typeof item === 'string');
 
+// `since`: a delegate's commands count only from this moment on. Anything the
+// account posted before, such as from a browser left signed in as it before it
+// was configured, never counts.
+const SINCE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+export const validSince = (value) => typeof value === 'string' && SINCE.test(value) && !Number.isNaN(Date.parse(value));
+
 function entryProblem(entry, admins) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'is not an object';
   if (typeof entry.login !== 'string' || !LOGIN.test(entry.login)) return 'has no valid login';
@@ -52,6 +58,7 @@ function entryProblem(entry, admins) {
     const unknown = entry.decide.find((cls) => !DECISION_CLASSES.includes(cls));
     if (unknown !== undefined) return `has an unknown decision class "${unknown}"`;
   }
+  if ('since' in entry && !validSince(entry.since)) return 'has a "since" that is not an ISO date and time';
   return null;
 }
 
@@ -86,6 +93,7 @@ export function cleanDelegates(config, warn = () => {}) {
         decide: [...(entry.decide ?? [])],
         rearm: entry.rearm === true,
         direct: entry.direct === true,
+        since: entry.since ?? null,
       });
     }
   });
