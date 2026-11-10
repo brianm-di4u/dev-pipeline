@@ -48,7 +48,7 @@ Every call is two comments, in this order:
    ```
 
    `action` is `approve`, `decide`, `rearm`, `send-back`, or `escalate`. `class` is the decision's class, or null.
-2. **The command**, alone, as its own comment: `/approve <hash>`, `/decide <option>`, or `/rearm`. Nothing else in that comment, and never edit it.
+2. **The command**, alone, as its own comment: `/approve <hash>`, `/decide <option>`, or `/rearm`. Nothing else in that comment, and never edit it. On Windows, post it with the PowerShell tool: Git Bash rewrites the leading slash, so the guard denies a command there.
 
 The bot records your call without pinging the admin, or says why it didn't count. If it didn't count, read the reason. Don't post the command again unless the reason is fixed.
 
