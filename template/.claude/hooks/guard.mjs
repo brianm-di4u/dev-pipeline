@@ -43,8 +43,17 @@ export function plainComment(command) {
   return PLAIN_COMMENT.test(text) && !SHELL_META.test(text);
 }
 
-const COMMAND_WORD = /(^|[\s"'=`])\/(approve|decide|rearm)\b/;
-const COMMAND_WORDS = /(?:^|[\s"'=`])\/(approve|decide|rearm)\b/g;
+// A command word as GitHub receives it, not only as typed. Git Bash on Windows
+// passes a run of leading slashes on with one fewer, and gh reads a one-letter
+// option's attached value as its value. So any run of slashes counts, after a
+// quote, a space, an `=`, or a one-letter option.
+const COMMAND_WORD = /(^|[\s"'=`])(?:-[A-Za-z])?\/+(approve|decide|rearm)\b/;
+const COMMAND_WORDS = /(?:^|[\s"'=`])(?:-[A-Za-z])?\/+(approve|decide|rearm)\b/g;
+
+// Git Bash on Windows rewrites an argument's leading slash into a path, so a
+// command posted from it reaches GitHub as something else and counts as nothing.
+const GIT_BASH_COMMAND =
+  'Git Bash on Windows rewrites a leading slash in an argument, so GitHub would not get this command as written. Post it with the PowerShell tool.';
 
 const RELEASE_WRITES = ['create', 'edit', 'delete', 'delete-asset', 'upload'];
 const DECISION_CLASSES = ['design', 'determination', 'legal', 'security', 'major'];
@@ -158,6 +167,7 @@ function checkGh(tokens, segment, context) {
       if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd)) {
         return 'Only a human posts /approve, /decide, or /rearm. Reword it, for example "the approve command".';
       }
+      if (context.gitBash) return GIT_BASH_COMMAND;
     }
   }
 
@@ -204,6 +214,7 @@ export function checkCommand(command, context = {}) {
     delegateMayPost: defaultDelegateMayPost,
     isDelegateSession: defaultIsDelegateSession,
     localDelegates: defaultLocalDelegates,
+    gitBash: false,
     ...context,
     command,
   };
@@ -316,7 +327,9 @@ export function checkTool({ tool_name: tool, tool_input: input = {}, cwd }, cont
     if (pattern.test(tool ?? '')) return `${tool} ${why}.`;
   }
   if (tool === 'Bash' || tool === 'PowerShell') {
-    return checkCommand(input.command ?? '', { cwd, ...context });
+    // On Windows the Bash tool is Git Bash.
+    const gitBash = tool === 'Bash' && (context.platform ?? process.platform) === 'win32';
+    return checkCommand(input.command ?? '', { cwd, gitBash, ...context });
   }
   return null;
 }
