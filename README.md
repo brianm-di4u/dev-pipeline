@@ -89,6 +89,22 @@ node "C:\Development Pipeline\bin\pipeline.mjs" update
 
 It updates pipeline files, keeps anything changed locally, and never touches files the project owns. If a broken gate ever can't approve its own fix, `pipeline protect --off` is the break-glass, followed by `pipeline protect`.
 
+## Merging in parallel (optional)
+
+By default GitHub requires every branch to be up to date with `main`, so each merge sends every other PR back for an update, and PRs land one at a time. To let PRs that don't overlap merge side by side, add this to `pipeline.config.json`:
+
+```json
+"freshness": { "mode": "overlap" }
+```
+
+The gate then lets a PR merge while behind `main`, unless `main` has since changed a file the PR changes, a file in a group the PR touches (`"groups": { "engine": ["crates/engine/**"] }`), or a floor path. Any change to a floor path holds every open PR until it updates: the pipeline's own files, `.github/`, and dependency manifests and lockfiles. `"floor": [...]` adds paths to the floor, and nothing can remove the built-in ones.
+
+1. Merge the config change. It's T2, so it needs your approval.
+2. Then, and only then, turn off **Require branches to be up to date before merging** in the branch rule for `main`. You do this by hand. An agent never does: `.pipeline/AUTONOMY.md` forbids it, and the guard blocks the API calls that would. Running `pipeline protect` again turns the rule back on.
+3. Run `pipeline doctor`. It warns if the rule is still on, so freshness has no effect yet, and if the rule is off without freshness, so nothing guards a stale merge.
+
+The weekly digest then counts PRs merged while behind `main`, and any revert or red main that followed one, so you can judge the trade.
+
 ## Developing this template
 
 ```bash

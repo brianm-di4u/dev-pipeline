@@ -2,6 +2,7 @@
 // GitHub. `gate.mjs` gathers the inputs and publishes the result.
 import { authority } from './authority.mjs';
 import { checkContract, delegateBarriers, delegateRefusals, findApproval, parseVerdict, touchMarkers } from './contract.mjs';
+import { STALE_TITLE, staleLines } from './freshness.mjs';
 import { classify } from './tier.mjs';
 
 export function evaluateGate({
@@ -27,6 +28,9 @@ export function evaluateGate({
   // read from the comments alone.
   touches,
   historyUnreadable = false,
+  // From lib/freshness.mjs, only with `freshness` configured. Left out, the gate
+  // doesn't look at how far behind main the branch is, as before.
+  freshness,
 }) {
   const { verdict, error: verdictError } = parseVerdict(pr.body);
   const { tier, reasons, flags } = classify({
@@ -99,6 +103,25 @@ export function evaluateGate({
       refusals: delegateRefusals(comments, auth, hash, ctx).map(({ login, reasons: why }) => ({ login, reasons: why })),
     };
     base.delegate = delegate;
+  }
+
+  // A stale branch is a worker's to update, not a person's call, so it holds the
+  // gate as a failure with its own title and marker, never as waiting for approval.
+  if (freshness) {
+    base.freshness = freshness;
+    if (freshness.stale) {
+      const others = blockers.length;
+      blockers.push(...staleLines(freshness, defaultBranch));
+      if (others === 0) {
+        return {
+          ...base,
+          status: 'completed',
+          conclusion: 'failure',
+          title: `T${tier}: ${STALE_TITLE}`,
+          summary: render(base, blockers),
+        };
+      }
+    }
   }
 
   if (blockers.length > 0) {

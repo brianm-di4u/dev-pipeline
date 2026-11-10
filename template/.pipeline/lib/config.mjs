@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { cleanDelegates } from './authority.mjs';
+import { cleanFreshness } from './freshness.mjs';
 
 export function parseConfig(text, { warn = (message) => console.warn(message) } = {}) {
   const config = JSON.parse(text);
@@ -12,6 +13,8 @@ export function parseConfig(text, { warn = (message) => console.warn(message) } 
   // Optional. Validated only when present, and never thrown on.
   if ('delegates' in config) config.delegates = cleanDelegates(config, warn);
   if ('models' in config) config.models = cleanModels(config.models, warn);
+  // A malformed one fails closed, to "every branch up to date": see lib/freshness.mjs.
+  if ('freshness' in config) config.freshness = cleanFreshness(config.freshness, warn);
   return config;
 }
 

@@ -47,7 +47,10 @@ async function heldPrs(client, repo, open, evaluate, login) {
     const runs = await client.list(`/repos/${repo}/commits/${pr.head.sha}/check-runs?check_name=pipeline%2Fgate&filter=latest&per_page=100`);
     if (gateCheck(runs)?.conclusion !== 'action_required') continue;
     try {
-      items.push(prItem(pr, await evaluate(client, repo, pr.number), login));
+      const result = await evaluate(client, repo, pr.number);
+      // A branch that needs an update from main is a worker's to fix, not a call to make.
+      if (result.freshness?.stale) continue;
+      items.push(prItem(pr, result, login));
     } catch (error) {
       items.push({ number: pr.number, title: pr.title, url: pr.html_url, error: error.message });
     }

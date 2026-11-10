@@ -66,6 +66,8 @@ const GATE_EVENTS = new Set(['pull_request_target', 'issue_comment', 'workflow_r
 // The pipeline's own workflows that re-publish the gate, and the events that run
 // their default-branch copy.
 const REPUBLISHERS = new Map([
+  // With freshness on, gate.yml re-evaluates open PRs when the default branch moves.
+  ['.github/workflows/gate.yml', new Set(['push'])],
   ['.github/workflows/post-merge.yml', new Set(['push'])],
   ['.github/workflows/audit.yml', new Set(['schedule', 'workflow_dispatch'])],
   ['.github/workflows/decisions.yml', new Set(['issue_comment', 'issues'])],
