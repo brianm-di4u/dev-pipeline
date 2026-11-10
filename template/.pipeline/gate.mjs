@@ -141,7 +141,10 @@ async function recordedTouches(client, repo, number, pr, config) {
 export function touchOf(eventName, event, config) {
   if (eventName !== 'pull_request_target') return null;
   const sender = event.sender?.login;
-  if (!sender || event.sender?.type === 'Bot' || !authority(config).delegateOfUser(event.sender)) return null;
+  const grant = sender ? authority(config).delegateOfUser(event.sender) : null;
+  // A Bot sender is a delegate's only as an App delegate's bot. The pipeline's own
+  // bot never is one, so its pushes and edits never mark a PR.
+  if (!grant || (event.sender?.type === 'Bot' && !grant.app)) return null;
   if (event.action === 'synchronize') return { kind: 'push', login: sender };
   if (event.action === 'edited' && event.changes?.body) return { kind: 'body', login: sender };
   return null;

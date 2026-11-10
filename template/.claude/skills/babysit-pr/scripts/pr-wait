@@ -80,6 +80,10 @@ DECISION_CLASSES = ("design", "determination", "legal", "security", "major")
 # A GitHub login, as .pipeline/lib/authority.mjs checks it.
 LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 SINCE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$")
+# An App delegate acts as `<slug>[bot]`. GitHub Actions' bot is the pipeline's own.
+SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,33}$", re.IGNORECASE)
+ACTIONS_APP_ID = 15368
+PIPELINE_BOT = "github-actions[bot]"
 
 
 # Delegates as .pipeline/lib/authority.mjs keeps them: a malformed entry, or one
@@ -91,10 +95,23 @@ def _delegates(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not isinstance(entries, list) or (paths is not None and not (isinstance(paths, list) and all(isinstance(p, str) for p in paths))):
         return {}
     kept: dict[str, dict[str, Any]] = {}
+    trusted_bots = {str(b).lower() for b in config.get("trustedBots", []) if isinstance(b, str)}
     for entry in entries:
-        if not isinstance(entry, dict) or not isinstance(entry.get("login"), str) or not LOGIN.match(entry["login"]):
+        if not isinstance(entry, dict) or ("login" in entry) == ("app" in entry):
             continue
-        login = entry["login"].lower()
+        if "app" in entry:
+            app = entry["app"]
+            if not (isinstance(app, dict) and set(app) <= {"id", "slug"} and type(app.get("id")) is int and app["id"] > 0):
+                continue
+            if app["id"] == ACTIONS_APP_ID or not (isinstance(app.get("slug"), str) and SLUG.match(app["slug"])) or "id" in entry:
+                continue
+            login = f"{app['slug']}[bot]".lower()
+            if login == PIPELINE_BOT or login in trusted_bots:
+                continue
+        elif not isinstance(entry.get("login"), str) or not LOGIN.match(entry["login"]):
+            continue
+        else:
+            login = entry["login"].lower()
         if login in admins or login in kept:
             continue
         if any(flag in entry and not isinstance(entry[flag], bool) for flag in ("approve", "approveExternal", "approveWorkflows", "rearm", "direct")):
@@ -124,21 +141,48 @@ DIRECT = frozenset(login for login, grant in DELEGATES.items() if grant.get("dir
 ACCESS = ("COLLABORATOR", "MEMBER", "OWNER")
 
 
-def vouched(node: Json) -> bool:
+def grant_of(node: Json) -> tuple[str, dict[str, Any]] | tuple[None, None]:
     author = node.get("author") or {}
-    grant = DELEGATES.get((author.get("login") or "").lower())
-    if grant is None or node.get("authorAssociation") not in ACCESS:
+    login = (author.get("login") or "").lower()
+    # GraphQL may name a bot without its [bot] suffix.
+    for key in (login, f"{login}[bot]") if author.get("__typename") == "Bot" else (login,):
+        if key in DELEGATES:
+            return key, DELEGATES[key]
+    return None, None
+
+
+# `rest` reads a top-level comment over REST by its database id. Only REST says
+# which App posted a comment, so without it an App delegate's words don't count.
+def vouched(node: Json, rest: Any = None) -> bool:
+    key, grant = grant_of(node)
+    if grant is None:
+        return False
+    author = node.get("author") or {}
+    if "app" in grant:
+        if author.get("__typename") != "Bot" or rest is None or node.get("databaseId") is None:
+            return False
+        try:
+            record = rest(node["databaseId"]) or {}
+        except GhError:
+            return False
+        user = record.get("user") or {}
+        via = record.get("performed_via_github_app") or {}
+        return user.get("type") == "Bot" and (user.get("login") or "").lower() == key and via.get("id") == grant["app"]["id"]
+    if author.get("__typename") == "Bot" or node.get("authorAssociation") not in ACCESS:
         return False
     return grant.get("id") is None or author.get("databaseId") == grant["id"]
 
 
-def trusted(node: Json) -> bool:
-    login = (node.get("author") or {}).get("login")
-    return login in ADMINS or ((login or "").lower() in DIRECT and vouched(node))
+def trusted(node: Json, rest: Any = None) -> bool:
+    author = node.get("author") or {}
+    if author.get("__typename") != "Bot" and author.get("login") in ADMINS:
+        return True
+    key, grant = grant_of(node)
+    return key in DIRECT and vouched(node, rest)
 
 
-def is_delegate(node: Json) -> bool:
-    return vouched(node)
+def is_delegate(node: Json, rest: Any = None) -> bool:
+    return vouched(node, rest)
 GATING_BOTS = tuple(CONFIG.get("reviewBots", {}).get("gating", []))
 ADVISORY_BOTS = tuple(CONFIG.get("reviewBots", {}).get("advisory", []))
 OWNER_COMMANDS = re.compile(r"^/(approve|decide|rearm)\b")
@@ -171,7 +215,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       url state headRefOid baseRefName mergeStateStatus
       author { login }
       baseRef { target { oid } }
-      comments(last: 100) { nodes { id url body authorAssociation author { login __typename ... on User { databaseId } } } }
+      comments(last: 100) { nodes { id databaseId url body authorAssociation author { login __typename ... on User { databaseId } } } }
       reviews(last: 100) {
         nodes { id url state body commit { oid } authorAssociation author { login __typename ... on User { databaseId } } }
       }
@@ -359,6 +403,7 @@ class Watcher:
         self.events = 0
         self.required: set[str] | None = None
         self.prev_snapshot: list[tuple[str, str]] | None = None
+        self.rest_cache: dict[int, Json] = {}
         self.pr_files: dict[str, set[str]] = {}
 
     def load(self) -> Json | None:
@@ -430,6 +475,12 @@ class Watcher:
             log(f"could not compare base commits: {error}")
             return []
         return sorted(self.pr_files[head].intersection(moved))
+
+    def rest_comment(self, database_id: int) -> Json:
+        """A top-level PR comment over REST, which records the App that posted it."""
+        if database_id not in self.rest_cache:
+            self.rest_cache[database_id] = json.loads(gh(["api", f"repos/{self.repo}/issues/comments/{database_id}"]).stdout)
+        return self.rest_cache[database_id]
 
     def gate_stale(self, head: str) -> str:
         """Whether the gate holds this head for an update from the base: "only" when
@@ -519,12 +570,12 @@ class Watcher:
             if login in ADMINS and OWNER_COMMANDS.match(comment["body"].strip()):
                 self.emit(f"c:{comment['id']}", f"owner command from {login}: {snippet(comment['body'])} {comment['url']}")
                 continue
-            if is_delegate(comment) and OWNER_COMMANDS.match(comment["body"].strip()):
+            if is_delegate(comment, self.rest_comment) and OWNER_COMMANDS.match(comment["body"].strip()):
                 self.emit(f"c:{comment['id']}", f"delegate command from {login}: {snippet(comment['body'])} {comment['url']}")
                 continue
             if login in mine or bot_name(login) or (is_bot and any(b in login for b in STATUS_BOTS)):
                 continue
-            tag = "" if trusted(comment) else " [untrusted]"
+            tag = "" if trusted(comment, self.rest_comment) else " [untrusted]"
             self.emit(f"c:{comment['id']}", f"comment from {login}{tag}: {snippet(comment['body'])} {comment['url']}")
         for review in reviews:
             login, is_bot = who(review)

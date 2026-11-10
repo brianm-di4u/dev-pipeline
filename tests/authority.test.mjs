@@ -212,7 +212,7 @@ test('a valid delegate is kept, with every grant spelled out', () => {
   const { config, warnings } = parseQuietly(withDelegates([{ login: 'gardener', approve: true, decide: ['design'] }]));
   assert.deepEqual(warnings, []);
   assert.deepEqual(config.delegates, [
-    { login: 'gardener', approve: true, approveExternal: false, approveWorkflows: false, decide: ['design'], rearm: false, direct: false, since: null, id: null },
+    { login: 'gardener', app: null, approve: true, approveExternal: false, approveWorkflows: false, decide: ['design'], rearm: false, direct: false, since: null, id: null },
   ]);
 });
 

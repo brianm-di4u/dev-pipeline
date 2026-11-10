@@ -21,10 +21,17 @@ param(
   # The delegate's own clone. It must be a git working tree.
   [string]$Clone = (Get-Location).Path,
   # The model the delegate's session runs on.
-  [string]$Model = 'claude-fable-5-1'
+  [string]$Model = 'claude-fable-5-1',
+  # Set the clone up as a GitHub App delegate instead of a user account. It asks
+  # for the App id and the downloaded private key. See docs/AGENT-TOKEN.md.
+  [switch]$App
 )
 
 $ErrorActionPreference = 'Stop'
+if ($App) {
+  & node (Join-Path $PSScriptRoot 'setup-delegate-app.mjs') --clone $Clone --model $Model
+  exit $LASTEXITCODE
+}
 $SettingsRelative = '.claude/settings.local.json'
 
 function Get-GitPath([string]$Root, [string]$Name) {

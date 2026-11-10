@@ -10,11 +10,11 @@ You hold part of the admin's authority, under your own GitHub account, as a dele
 ## 0. Know who you are
 
 ```bash
-gh api user --jq .login
+node .pipeline/garden.mjs whoami
 node .pipeline/garden.mjs inbox
 ```
 
-The login must equal the inbox's `login`, and the inbox's `delegate` must be your grant. If either is wrong, or the inbox reports an `error`, stop and tell the admin. Don't act on a guess about who you are.
+`whoami` runs the guard's own identity check, so it works whether you are a user account or a GitHub App, which `gh api user` can't name. Its `delegate` must be your grant, and the inbox's `login` must equal its `login`. If either is wrong, or either reports an `error`, stop and tell the admin. Don't act on a guess about who you are.
 
 ## 1. Each tick
 

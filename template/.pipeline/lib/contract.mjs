@@ -46,12 +46,15 @@ export function renderVerdict(verdict) {
 }
 
 // Commands count only as a comment's entire body, from an admin or a delegate,
-// never edited, never from a Bot account. A comment that quotes a command
-// therefore does nothing. `auth` is a bare admins list, a config, or an authority.
+// never edited. A comment that quotes a command therefore does nothing. A Bot
+// account counts only as the bot of an App delegate, and then only as that
+// delegate; whether the App really posted it is identityProblems' to say.
+// `auth` is a bare admins list, a config, or an authority.
 export function actorOf(comment, auth) {
-  if (!comment || comment.user?.type === 'Bot' || comment.created_at !== comment.updated_at) return null;
+  if (!comment || comment.created_at !== comment.updated_at) return null;
   const who = toAuthority(auth);
   const login = comment.user?.login;
+  if (comment.user?.type === 'Bot') return who.delegateOf(login)?.app ? 'delegate' : null;
   if (who.isAdmin(login)) return 'admin';
   if (who.delegateOf(login)) return 'delegate';
   return null;
@@ -145,6 +148,7 @@ export function delegateBarriers(auth, login, ctx = {}) {
 export const ACCESS = ['COLLABORATOR', 'MEMBER', 'OWNER'];
 
 export function identityProblems(item, grant) {
+  if (grant.app) return appIdentityProblems(item, grant);
   const reasons = [];
   const association = item?.author_association;
   if (!ACCESS.includes(association)) {
@@ -153,6 +157,18 @@ export function identityProblems(item, grant) {
   if (grant.id !== null && grant.id !== undefined && item?.user?.id !== grant.id) {
     reasons.push(`it came from account ${item?.user?.id ?? 'unknown'}, not ${grant.login}'s configured id ${grant.id}`);
   }
+  return reasons;
+}
+
+// An App delegate's proof is GitHub's record of which App posted it: an
+// installation token only writes where the App is installed. A bot is never a
+// collaborator, so its author_association isn't asked for. A missing field fails.
+function appIdentityProblems(item, grant) {
+  const reasons = [];
+  if (item?.user?.type !== 'Bot') reasons.push(`it was not posted by ${grant.login}, an App`);
+  if (!sameLogin(item?.user?.login, grant.login)) reasons.push(`it was posted by ${item?.user?.login ?? 'unknown'}, not ${grant.login}`);
+  const via = item?.performed_via_github_app?.id;
+  if (via !== grant.app.id) reasons.push(`GitHub doesn't record it as posted through App ${grant.app.id} (${via ?? 'no App recorded'})`);
   return reasons;
 }
 

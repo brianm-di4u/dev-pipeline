@@ -74,9 +74,54 @@ node "C:\Development Pipeline\tests\e2e\agent-token.mjs" <sandbox-clone>
 
 Run `pipeline init`, `protect`, and `update` from your own terminal, where `GH_TOKEN` isn't set. Those three need Administration or Workflows access, which is why they're yours.
 
-## A delegate's token
+## A delegate as a GitHub App (recommended)
 
-A delegate is a second GitHub account that may post some of the approval commands, listed under `delegates` in the project's `pipeline.config.json`. GIS Workbench's, for example:
+A delegate can be a GitHub App installation instead of a user account. There's no account for GitHub to flag or suspend, you choose its permissions, and its tokens last an hour. It acts as `<slug>[bot]`, and the gate counts its command only when GitHub records the comment as posted through that App. In `pipeline.config.json`:
+
+```json
+"delegates": [{ "app": { "id": 123456, "slug": "gwb-gardener-app" }, "approve": true,
+                "decide": ["design"], "rearm": true, "since": "2026-11-10T00:00:00Z" }]
+```
+
+1. **Create the App** in GitHub, Settings, Developer settings, GitHub Apps, New GitHub App. Give it a name, the repo's URL as its homepage, and no active webhook. Install it "Only on this account".
+2. **Give it only these repository permissions:**
+   - Contents: read and write
+   - Workflows: read and write
+   - Issues: read and write
+   - Pull requests: read and write
+   - Actions: read
+   - Checks: read
+   - Metadata: read
+
+   Never give it Checks write, Commit statuses, Administration, Secrets, Variables, Environments, Webhooks, Pages or Deployments. The setup script refuses an App that has any permission outside the list, and the token hook refuses to mint one.
+3. **Install it** on the target repo and the sandbox only.
+4. **Generate a private key** when you're ready to set up, not before. It downloads as a `.pem`.
+5. **Run the setup script** for each delegate clone, from your own terminal:
+
+   ```powershell
+   pwsh -File "C:\Development Pipeline\tools\setup-delegate.ps1" -App -Clone "C:\GIS Workbench\gwb-garden"
+   ```
+
+   - **Check:** it asks for the App id and the key's path. It shows you the App, its installation and permissions, and asks before writing anything.
+   - **Key:** it moves the key out of Downloads to `%USERPROFILE%\.pipeline-delegates\<slug>\app.pem`, readable by you only.
+   - **Clone settings:** it writes the clone's `.claude/settings.local.json`:
+     - the token hook;
+     - the folder gh reads its login from;
+     - every token variable set empty, so nothing inherited wins;
+     - git's credential helpers cleared before gh's own is added, so a push never falls back to your stored credentials;
+     - the bot's commit identity.
+   - **Output:** it mints a first token, probes with it, and prints the `delegates` entry.
+6. **Add the entry** to `pipeline.config.json` through a PR you approve.
+
+The token hook, `.claude/hooks/delegate-token.mjs`, runs before each shell command in the delegate's session. It mints a new installation token when the current one has under 20 minutes left, scoped to the clone's repo and to the permissions above. It writes the token where gh reads it, beside the key and outside the clone, and never prints it. If it can't mint, it removes the old token, so gh is logged out rather than logged in as anyone else. Agents can't read that folder, the guard denies any command naming it or running the hook, and `pipeline doctor` checks the clone's setup.
+
+**The narrower option:** without Contents and Workflows write, the App can't push at all. That removes the forged-gate risk below, and leaves workflow relays with you.
+
+## A delegate as a user account
+
+GitHub can flag a new machine account and suspend it, which happened to `gwb-gardener`. The App route above avoids that.
+
+A delegate can also be a second GitHub account that may post some of the approval commands, listed under `delegates` in the project's `pipeline.config.json`. GIS Workbench's, for example:
 
 ```json
 "delegates": [{ "login": "gwb-gardener", "approve": true,

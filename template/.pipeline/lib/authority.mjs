@@ -1,9 +1,14 @@
 // Who may post which command. Admins hold every power. A delegate is a separate
-// GitHub account the owner grants a subset of commands to, in pipeline.config.json:
+// GitHub account, or a GitHub App installation, that the owner grants a subset of
+// commands to, in pipeline.config.json:
 //
 //   "delegates": [{ "login": "gardener", "approve": true,
 //                   "decide": ["design", "security", "determination"],
 //                   "rearm": true, "direct": true }]
+//
+// An App delegate names the App in place of a login, and acts as `<slug>[bot]`:
+//
+//   { "app": { "id": 123456, "slug": "gardener-app" }, "approve": true }
 //
 // With no `delegates` key, nothing here changes how the pipeline behaves.
 
@@ -27,6 +32,12 @@ export const ADMIN_ONLY_FLOOR = [
 ];
 
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+// A GitHub App's slug, and the pipeline's own bot, which never counts as a delegate.
+const SLUG = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,33}$/i;
+export const PIPELINE_BOT = 'github-actions[bot]';
+// GitHub Actions' own App id. Its bot is the pipeline's.
+export const ACTIONS_APP_ID = 15368;
+export const botLogin = (slug) => `${slug}[bot]`;
 const FLAGS = ['approve', 'approveExternal', 'approveWorkflows', 'rearm', 'direct'];
 
 // A merged workflow with `checks: write` could forge pipeline/gate from main for
@@ -46,10 +57,31 @@ const isStringList = (value) => Array.isArray(value) && value.every((item) => ty
 const SINCE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 export const validSince = (value) => typeof value === 'string' && SINCE.test(value) && !Number.isNaN(Date.parse(value));
 
-function entryProblem(entry, admins) {
+function appProblem(app, trustedBots) {
+  if (!app || typeof app !== 'object' || Array.isArray(app)) return 'has an "app" that is not an object';
+  const unknown = Object.keys(app).find((key) => !['id', 'slug'].includes(key));
+  if (unknown) return `has an "app" with an unknown key "${unknown}"`;
+  if (!validUserId(app.id)) return 'has an "app" with no valid id';
+  if (app.id === ACTIONS_APP_ID) return "names GitHub Actions, the pipeline's own App";
+  if (typeof app.slug !== 'string' || !SLUG.test(app.slug)) return 'has an "app" with no valid slug';
+  const bot = botLogin(app.slug);
+  if (sameLogin(bot, PIPELINE_BOT)) return "names the pipeline's own bot";
+  if (trustedBots.some((other) => sameLogin(other, bot))) return 'names a bot in "trustedBots"';
+  return null;
+}
+
+function entryProblem(entry, admins, trustedBots) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'is not an object';
-  if (typeof entry.login !== 'string' || !LOGIN.test(entry.login)) return 'has no valid login';
-  if (admins.some((admin) => sameLogin(admin, entry.login))) return 'is also an admin';
+  if ('login' in entry === 'app' in entry) return 'needs exactly one of "login" and "app"';
+  if ('app' in entry) {
+    const problem = appProblem(entry.app, trustedBots);
+    if (problem) return problem;
+    // An App is pinned by its own id, so a user id has no place here.
+    if ('id' in entry) return 'has an "id", which is for a user account; an App is pinned by "app.id"';
+  } else {
+    if (typeof entry.login !== 'string' || !LOGIN.test(entry.login)) return 'has no valid login';
+    if (admins.some((admin) => sameLogin(admin, entry.login))) return 'is also an admin';
+  }
   for (const flag of FLAGS) {
     if (flag in entry && typeof entry[flag] !== 'boolean') return `has a non-boolean "${flag}"`;
   }
@@ -83,17 +115,20 @@ export function cleanDelegates(config, warn = () => {}) {
     return [];
   }
   const admins = Array.isArray(config.admins) ? config.admins : [];
+  const trustedBots = isStringList(config.trustedBots) ? config.trustedBots : [];
   const kept = [];
   config.delegates.forEach((entry, index) => {
-    const problem = entryProblem(entry, admins);
-    const name = typeof entry?.login === 'string' ? `"${entry.login}"` : `#${index + 1}`;
+    const problem = entryProblem(entry, admins, trustedBots);
+    const login = typeof entry?.app?.slug === 'string' ? botLogin(entry.app.slug) : entry?.login;
+    const name = typeof login === 'string' ? `"${login}"` : `#${index + 1}`;
     if (problem) {
       warn(`pipeline.config.json: delegate ${name} ${problem}, so it was dropped.`);
-    } else if (kept.some((other) => sameLogin(other.login, entry.login))) {
+    } else if (kept.some((other) => sameLogin(other.login, login) || (entry.app && other.app?.id === entry.app.id))) {
       warn(`pipeline.config.json: delegate ${name} is listed twice, so the second entry was dropped.`);
     } else {
       kept.push({
-        login: entry.login,
+        login,
+        app: entry.app ? { id: entry.app.id, slug: entry.app.slug } : null,
         approve: entry.approve === true,
         approveExternal: entry.approveExternal === true,
         approveWorkflows: entry.approveWorkflows === true,

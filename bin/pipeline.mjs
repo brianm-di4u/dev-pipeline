@@ -25,6 +25,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { requestedPermissions } from '../template/.claude/hooks/delegate-token.mjs';
 import { cleanFreshness } from '../template/.pipeline/lib/freshness.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -614,13 +615,81 @@ async function doctor({ flags }) {
     add('warn', 'GitHub', 'no remote repo found');
   }
 
-  const token = tokenCheck(spawnSync('gh', ['api', '-i', 'user'], { encoding: 'utf8' }).stdout ?? '', config);
-  add(token.level, token.name, token.detail);
+  const local = localSettings(cwd);
+  const delegateDir = local?.env?.PIPELINE_DELEGATE_DIR;
+  if (delegateDir) {
+    // An App delegate's clone: gh can't name an installation token's user.
+    const base = dirname(delegateDir);
+    for (const check of appDelegateChecks({
+      settings: local,
+      processEnv: process.env,
+      keyExists: existsSync(join(base, 'app.pem')),
+      access: process.platform === 'win32' ? tryRun('icacls', [base]) : (statSync(base, { throwIfNoEntry: false })?.mode ?? null),
+      identity: (() => {
+        try {
+          return JSON.parse(readFileSync(join(delegateDir, 'identity.json'), 'utf8'));
+        } catch {
+          return null;
+        }
+      })(),
+    })) {
+      add(check.level, check.name, check.detail);
+    }
+  } else {
+    const token = tokenCheck(spawnSync('gh', ['api', '-i', 'user'], { encoding: 'utf8' }).stdout ?? '', config);
+    add(token.level, token.name, token.detail);
+  }
 
   const mark = { ok: 'ok   ', warn: 'warn ', fail: 'FAIL ' };
   for (const { level, name, detail } of results) console.log(`${mark[level]} ${name}${detail ? `: ${detail}` : ''}`);
   console.log(`\nEnforcement level: ${enforcement}`);
   return results.some((r) => r.level === 'fail') ? 1 : 0;
+}
+
+function localSettings(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, '.claude', 'settings.local.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// Variables gh or git read a token, a host or a prompt from. In an App delegate's
+// clone each must be set empty in its settings, so nothing inherited wins over the
+// installation token, and none may be set in the terminal the session starts from.
+export const TOKEN_VARIABLES = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GIT_ASKPASS', 'SSH_ASKPASS'];
+
+// An App delegate's clone, from its settings and what doctor read about the key
+// and the last token. `access` is icacls output on Windows, or the folder's mode.
+export function appDelegateChecks({ settings, processEnv = {}, keyExists, access, identity }) {
+  const results = [];
+  const add = (level, name, detail = '') => results.push({ level, name, detail });
+  const env = settings?.env ?? {};
+  const unblanked = TOKEN_VARIABLES.filter((name) => env[name] !== '');
+  add(unblanked.length ? 'fail' : 'ok', 'Delegate token variables', unblanked.length ? `settings.local.json must set these empty: ${unblanked.join(', ')}` : 'all set empty');
+  const inherited = [...TOKEN_VARIABLES, ...Object.keys(processEnv).filter((name) => /^GCM_/.test(name))].filter((name) => processEnv[name]);
+  const gcm = Object.keys(env).filter((name) => /^GCM_/.test(name) && env[name]);
+  if (inherited.length || gcm.length) add('warn', 'Inherited credentials', `set where a session would start: ${[...new Set([...inherited, ...gcm])].join(', ')}`);
+  const helpers = [0, 1, 2].map((i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
+  const resets = helpers[0][0] === 'credential.helper' && helpers[0][1] === '' && helpers[1][0] === 'credential.https://github.com.helper' && helpers[1][1] === '';
+  add(resets ? 'ok' : 'fail', 'Git credentials', resets ? "the owner's helpers are cleared first" : "git's credential helpers aren't cleared first, so a push could use the owner's stored credentials");
+  const hooked = JSON.stringify(settings?.hooks?.PreToolUse ?? []).includes('delegate-token.mjs');
+  add(hooked ? 'ok' : 'fail', 'Token hook', hooked ? 'wired' : 'delegate-token.mjs is not a PreToolUse hook in settings.local.json');
+  add(keyExists ? 'ok' : 'fail', 'App key', keyExists ? 'present' : 'app.pem is missing');
+  const open = typeof access === 'number' ? (access & 0o077) !== 0 : /\b(Everyone|BUILTIN\\Users|Authenticated Users)\b/i.test(access ?? '');
+  if (keyExists) add(open || access == null ? 'warn' : 'ok', 'App key access', open ? 'other users can read the key folder' : access == null ? 'unknown' : 'you only');
+  if (!identity) {
+    add('warn', 'Installation token', 'none yet: the hook mints one on the first tool call');
+  } else {
+    let problem = null;
+    try {
+      requestedPermissions(identity.permissions);
+    } catch (error) {
+      problem = error.message;
+    }
+    add(problem ? 'fail' : 'ok', 'App permissions', problem ?? Object.entries(identity.permissions ?? {}).map(([n, l]) => `${n}: ${l}`).join(', '));
+  }
+  return results;
 }
 
 // Whether GitHub requires branches to be up to date before merging, from branch

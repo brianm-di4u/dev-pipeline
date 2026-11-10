@@ -18,7 +18,7 @@ const DENIED_TOOLS = [
 ];
 
 const CREDENTIAL_PATTERN =
-  /\.credentials\.json|[\\/]\.ssh[\\/]|hosts\.yml|\.netrc|[\\/]\.aws[\\/]credentials|\bcmdkey\b|\bvaultcmd\b|credentialmanager|git\s+credential\s+fill|\b(GH|GITHUB)_TOKEN\b/i;
+  /\.credentials\.json|[\\/]\.ssh[\\/]|hosts\.yml|\.netrc|[\\/]\.aws[\\/]credentials|\bcmdkey\b|\bvaultcmd\b|credentialmanager|git\s+credential\s+fill|\b(GH|GITHUB)_(ENTERPRISE_)?TOKEN\b|\.pipeline-delegates|\bPIPELINE_DELEGATE_DIR\b|\bGH_CONFIG_DIR\b|delegate-token\.mjs|\bapp\.pem\b/i;
 
 // With a delegate configured, settings.local.json can hold its token. See
 // docs/AGENT-TOKEN.md in dev-pipeline.
@@ -278,17 +278,35 @@ export function checkCommand(command, context = {}) {
 
 const sameLogin = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
+// As in .pipeline/lib/authority.mjs: an App delegate acts as `<slug>[bot]`.
+const SLUG = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,33}$/i;
+const ACTIONS_APP_ID = 15368;
+const entryLogin = (entry) => (entry?.app && typeof entry.app.slug === 'string' ? `${entry.app.slug}[bot]` : entry?.login);
+
+function appEntryValid(entry, trustedBots) {
+  const app = entry.app;
+  if (!app || typeof app !== 'object' || Array.isArray(app) || Object.keys(app).some((key) => !['id', 'slug'].includes(key))) return false;
+  if (!(Number.isSafeInteger(app.id) && app.id > 0) || app.id === ACTIONS_APP_ID) return false;
+  if (typeof app.slug !== 'string' || !SLUG.test(app.slug) || 'id' in entry) return false;
+  const bot = entryLogin(entry);
+  return !sameLogin(bot, 'github-actions[bot]') && !trustedBots.some((other) => sameLogin(other, bot));
+}
+
 // Whether `login`'s grant in `config` covers every command word. It mirrors
 // .pipeline/lib/authority.mjs, so the hook needs nothing outside this file: an
 // entry the gate would drop grants nothing here either.
 // `id` is the session's numeric user id: with an `id` in the grant, it must match.
-export function grantCovers(config, login, words, id = null) {
+// `appId` is an App session's App: an App grant must name that App.
+export function grantCovers(config, login, words, id = null, appId = null) {
   const admins = Array.isArray(config?.admins) ? config.admins : [];
   if (!login || admins.some((admin) => sameLogin(admin, login))) return false;
   const adminOnly = config.tiers?.adminOnlyPaths;
   if (adminOnly !== undefined && !(Array.isArray(adminOnly) && adminOnly.every((p) => typeof p === 'string'))) return false;
-  const grant = (Array.isArray(config?.delegates) ? config.delegates : []).find((entry) => sameLogin(entry?.login, login));
+  const grant = (Array.isArray(config?.delegates) ? config.delegates : []).find((entry) => sameLogin(entryLogin(entry), login));
   if (!grant) return false;
+  if ('login' in grant === 'app' in grant) return false;
+  const trustedBots = Array.isArray(config.trustedBots) ? config.trustedBots.filter((bot) => typeof bot === 'string') : [];
+  if ('app' in grant && !(appEntryValid(grant, trustedBots) && grant.app.id === appId)) return false;
   for (const flag of ['approve', 'approveExternal', 'approveWorkflows', 'rearm', 'direct']) {
     if (flag in grant && typeof grant[flag] !== 'boolean') return false;
   }
@@ -314,17 +332,29 @@ function defaultLocalDelegates(cwd) {
   }
 }
 
-// Who the session is comes from GitHub (`gh api user`), and the delegates from the
-// default branch's config, read through the API, so editing the working tree
-// changes nothing. Throws on any error or timeout.
-function sessionConfig(cwd) {
-  const [login, id] = lookup(['api', 'user', '--jq', '[.login, .id] | @tsv'], cwd).split('\t');
+// Who the session is comes from GitHub, and the delegates from the default
+// branch's config, read through the API, so editing the working tree changes
+// nothing. A user session is who `gh api user` names. An App delegate's session
+// has PIPELINE_DELEGATE_DIR, where the token hook names the App. `gh api user`
+// refuses an installation token, so a live probe of the installation's repos
+// must list the working repo instead. Throws on any error or timeout.
+export function sessionIdentity(cwd, env = process.env) {
   const repo = JSON.parse(lookup(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef'], cwd));
   const content = lookup(
     ['api', `repos/${repo.nameWithOwner}/contents/pipeline.config.json?ref=${repo.defaultBranchRef.name}`, '--jq', '.content'],
     cwd,
   );
-  return { login, id: Number(id), repo: repo.nameWithOwner, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
+  const config = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
+  if (env.PIPELINE_DELEGATE_DIR) {
+    const identity = JSON.parse(readFileSync(`${env.PIPELINE_DELEGATE_DIR}/identity.json`, 'utf8'));
+    const repos = lookup(['api', 'installation/repositories', '--jq', '.repositories[].full_name'], cwd).split('\n');
+    if (!sameLogin(identity.repo, repo.nameWithOwner) || !repos.some((name) => sameLogin(name, repo.nameWithOwner))) {
+      throw new Error('the installation token is not for this repo');
+    }
+    return { kind: 'app', login: `${identity.slug}[bot]`, id: null, appId: identity.appId, repo: repo.nameWithOwner, config };
+  }
+  const [login, id] = lookup(['api', 'user', '--jq', '[.login, .id] | @tsv'], cwd).split('\t');
+  return { kind: 'user', login, id: Number(id), appId: null, repo: repo.nameWithOwner, config };
 }
 
 // A delegate's own session may post the commands its grant covers. Any error or
@@ -335,9 +365,9 @@ function sessionConfig(cwd) {
 function defaultDelegateMayPost(words, cwd, targets = []) {
   if (!defaultLocalDelegates(cwd)) return false;
   try {
-    const { login, id, repo, config } = sessionConfig(cwd);
+    const { login, id, appId, repo, config } = sessionIdentity(cwd);
     if (!aimedOnlyAt(targets, repo)) return false;
-    return grantCovers(config, login, words, id);
+    return grantCovers(config, login, words, id, appId);
   } catch {
     return false;
   }
@@ -346,10 +376,12 @@ function defaultDelegateMayPost(words, cwd, targets = []) {
 // Whether this is a delegate's own session, for the rules only it gets. If the
 // lookup fails, assume it is: those rules only take away.
 function defaultIsDelegateSession(cwd) {
+  // An App delegate's clone sets this, and only an App delegate's session has it.
+  if (process.env.PIPELINE_DELEGATE_DIR) return true;
   if (!defaultLocalDelegates(cwd)) return false;
   try {
-    const { login, config } = sessionConfig(cwd);
-    return (Array.isArray(config.delegates) ? config.delegates : []).some((entry) => sameLogin(entry?.login, login));
+    const { login, config } = sessionIdentity(cwd);
+    return (Array.isArray(config.delegates) ? config.delegates : []).some((entry) => sameLogin(entryLogin(entry), login));
   } catch {
     return true;
   }

@@ -3,6 +3,7 @@
 // document. It keeps no state of its own, like `autopilot.mjs next`. The
 // `gardener` skill drives it.
 //
+//   garden.mjs whoami          Who this session is, by the guard's own check
 //   garden.mjs inbox           Print the inbox
 //   garden.mjs record daily    Record that today's gardening pass is done
 //
@@ -12,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { sessionIdentity } from '../.claude/hooks/guard.mjs';
 import { gather } from './gate.mjs';
 import { authority } from './lib/authority.mjs';
 import { parseConfig } from './lib/config.mjs';
@@ -93,6 +95,8 @@ export async function buildInbox({
   login,
   // The session's numeric user id. With an `id` in the grant, it must match.
   userId = null,
+  // An App delegate's session: its App. An App grant must name it.
+  appId = null,
   evaluate = evaluatePr,
   branches = remoteBranches,
   projectCounts = counts,
@@ -125,12 +129,11 @@ export async function buildInbox({
   const openHeads = open.filter((pr) => pr.head?.repo?.full_name === repo).map((pr) => pr.head.ref);
 
   const named = auth.delegateOf(login);
-  // A grant with an id is this session's only if the account is that one.
-  const grant = named && named.id !== null && named.id !== userId ? null : named;
+  const mismatch = grantMismatch(named, userId, appId);
   return {
     login,
-    delegate: grant,
-    ...(named && !grant ? { error: `This session's account id is ${userId ?? 'unknown'}, not ${named.login}'s configured id ${named.id}.` } : {}),
+    delegate: mismatch ? null : named,
+    ...(mismatch ? { error: mismatch } : {}),
     state: {
       mainRed: state.mainRed,
       redIssue: state.redIssue,
@@ -159,13 +162,37 @@ export async function baseConfig(client, repo, defaultBranch) {
   return parseConfig(Buffer.from(file.content, 'base64').toString('utf8'));
 }
 
+// Why `grant` isn't this session's, or null. A grant with an id is this session's
+// only if the account is that one, and an App grant only in that App's session.
+export function grantMismatch(grant, userId, appId) {
+  if (!grant) return null;
+  if (grant.app) return grant.app.id === appId ? null : `This session isn't App ${grant.app.id}, ${grant.login}'s App.`;
+  if (grant.id !== null && grant.id !== userId) return `This session's account id is ${userId ?? 'unknown'}, not ${grant.login}'s configured id ${grant.id}.`;
+  return null;
+}
+
+// The guard's own identity check, so the gardener acts on what the guard allows.
+function whoami() {
+  try {
+    const session = sessionIdentity(process.cwd());
+    const config = parseConfig(JSON.stringify(session.config), { warn: () => {} });
+    const grant = authority(config).delegateOf(session.login);
+    const mismatch = grant ? grantMismatch(grant, session.id, session.appId) : `${session.login} is not a delegate in ${session.repo}.`;
+    const { config: _, ...who } = session;
+    console.log(JSON.stringify({ ...who, delegate: mismatch ? null : grant, ...(mismatch ? { error: mismatch } : {}) }, null, 2));
+    return mismatch ? 1 : 0;
+  } catch (error) {
+    console.log(JSON.stringify({ error: `Could not tell who this session is: ${error.message}` }, null, 2));
+    return 1;
+  }
+}
+
 async function inbox() {
   try {
-    const { nameWithOwner: repo, defaultBranchRef } = JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef']));
-    const [login, id] = gh(['api', 'user', '--jq', '[.login, .id] | @tsv']).split('\t');
+    const session = sessionIdentity(process.cwd());
     const client = cliClient();
-    const config = await baseConfig(client, repo, defaultBranchRef.name);
-    const result = await buildInbox({ client, repo, config, now: new Date(), login, userId: Number(id) });
+    const config = parseConfig(JSON.stringify(session.config), { warn: () => {} });
+    const result = await buildInbox({ client, repo: session.repo, config, now: new Date(), login: session.login, userId: session.id, appId: session.appId });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (error) {
@@ -192,10 +219,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     inbox().then((code) => {
       process.exitCode = code;
     });
+  } else if (command === 'whoami') {
+    process.exitCode = whoami();
   } else if (command === 'record') {
     process.exitCode = record(args);
   } else {
-    console.error('Usage: garden.mjs inbox | record daily');
+    console.error('Usage: garden.mjs whoami | inbox | record daily');
     process.exitCode = 2;
   }
 }

@@ -23,7 +23,7 @@
 // must run this version of the pipeline with that delegate under `delegates` in
 // pipeline.config.json on main. See docs/sandbox-results.md for the run plan.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const [mode, dirArg] = process.argv.slice(2);
@@ -50,7 +50,11 @@ const api = (path) => JSON.parse(gh('api', path));
 const post = (path, body) => JSON.parse(sh('gh', ['api', '-X', 'POST', path, '--input', '-'], JSON.stringify(body)));
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-const me = gh('api', 'user', '--jq', '.login');
+// An App delegate's installation token can't name itself through `gh api user`, so
+// its session reads the login the token hook recorded. See docs/AGENT-TOKEN.md.
+const me = process.env.PIPELINE_DELEGATE_DIR
+  ? JSON.parse(readFileSync(join(process.env.PIPELINE_DELEGATE_DIR, 'identity.json'), 'utf8')).login
+  : gh('api', 'user', '--jq', '.login');
 // From the remote, not `gh repo view`, so the delegate side needs no GraphQL here.
 const repo = /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/.exec(git('remote', 'get-url', 'origin'))[1];
 const mainConfig = () => JSON.parse(Buffer.from(api(`repos/${repo}/contents/pipeline.config.json?ref=main`).content, 'base64').toString('utf8'));
@@ -166,7 +170,7 @@ function finish() {
 async function setup() {
   const config = mainConfig();
   if (!config.admins.some((a) => same(a, me))) throw new Error(`setup runs as an admin; gh is ${me}`);
-  const grant = (config.delegates ?? []).find((d) => same(d.login, EXPECTED));
+  const grant = (config.delegates ?? []).find((d) => same(d.app ? `${d.app.slug}[bot]` : d.login, EXPECTED));
   if (!grant) throw new Error(`${EXPECTED} isn't under "delegates" in ${repo}'s config on main`);
   const id = Date.now().toString(36);
   // Labels the run needs. The bot makes most of its own, but not all of them yet.
