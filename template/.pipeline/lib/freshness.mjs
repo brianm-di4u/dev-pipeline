@@ -56,6 +56,8 @@ export function expandEntries(entries) {
 // every change on main, as GitHub's strict rule would.
 export function cleanFreshness(value, warn = () => {}) {
   if (value === undefined) return null;
+  // Already cleaned and failed closed: keep it as it is, so cleaning twice changes nothing.
+  if (value?.mode === 'current' && typeof value.problem === 'string' && Object.keys(value).length === 2) return { mode: 'current', problem: value.problem };
   const problem = freshnessProblem(value);
   if (problem) {
     warn(`pipeline.config.json: "freshness" ${problem}, so the gate needs every branch up to date with main.`);
