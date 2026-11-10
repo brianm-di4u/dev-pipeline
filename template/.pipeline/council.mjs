@@ -3,6 +3,7 @@
 //
 //   council.mjs plan --intent "..." [--out-of-scope "..."]   What happens next, as JSON
 //                    [--decision <issue>]                    A decision record citing that issue
+//                    [--worker <model>]                      The model that wrote the change
 //   council.mjs record <result.json>                         Record a round's result
 //   council.mjs resolve <id> <fixed|wrong|intentional|wont-matter|deferred> ["reason"]
 //   council.mjs accept-growth "reason"                       Accept justified diff growth
@@ -13,7 +14,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { parseConfig } from './lib/config.mjs';
+import { authority } from './lib/authority.mjs';
+import { MODEL_NAME, parseConfig } from './lib/config.mjs';
 import { findDecision, renderVerdict } from './lib/contract.mjs';
 import { changeSet, git, tryGit } from './lib/git.mjs';
 import {
@@ -47,19 +49,29 @@ function saveLedger(ledger) {
   writeFileSync(ledgerPath(), `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
-// The gate puts a decision record at T0 when the PR body cites an issue carrying the admin's
-// /decide. The body doesn't exist yet when the council plans, so `plan --decision <issue>` names
-// the issue, and it is checked the same way here.
-function decided(issues, admins) {
+// The gate puts a decision record at T0 when the PR body cites an issue carrying a /decide that
+// counts: an admin's, or a delegate's within its grant. The body doesn't exist yet when the council
+// plans, so `plan --decision <issue>` names the issue, and it is checked the same way here, except
+// for delegate suspension, which this can't see. The gate checks that again, and it is the authority.
+function decided(issues, config) {
   if (issues.length === 0) return false;
-  return issues.every((issue) => {
-    const pages = JSON.parse(
-      execFileSync('gh', ['api', '--paginate', '--slurp', `repos/{owner}/{repo}/issues/${issue}/comments?per_page=100`], {
+  const ghJson = (path, all = true) =>
+    JSON.parse(
+      execFileSync('gh', ['api', ...(all ? ['--paginate', '--slurp'] : []), path], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       }),
     );
-    return findDecision(pages.flat(), admins) !== null;
+  const delegated = authority(config).delegates.length > 0;
+  return issues.every((issue) => {
+    const comments = ghJson(`repos/{owner}/{repo}/issues/${issue}/comments?per_page=100`).flat();
+    const ctx = { ignoreSuspension: true };
+    // A delegate's /decide also needs the issue's author and label history.
+    if (delegated) {
+      ctx.issueAuthor = ghJson(`repos/{owner}/{repo}/issues/${issue}`, false).user?.login ?? null;
+      ctx.events = ghJson(`repos/{owner}/{repo}/issues/${issue}/events?per_page=100`).flat();
+    }
+    return findDecision(comments, config, ctx) !== null;
   });
 }
 
@@ -81,7 +93,7 @@ function context() {
     config,
     author: config.admins[0],
     scriptsChangedIn: scriptsChanged(changes, mergeBase, 'HEAD'),
-    adrCited: decided(loadLedger().decisions ?? [], config.admins),
+    adrCited: decided(loadLedger().decisions ?? [], config),
   });
   const shortstat = tryGit(['diff', '--shortstat', mergeBase, 'HEAD']) ?? '';
   const diffLines = [...shortstat.matchAll(/(\d+) (?:insertion|deletion)/g)].reduce((sum, m) => sum + Number(m[1]), 0);
@@ -100,6 +112,11 @@ function plan(args) {
   if (cited.length > 0) {
     if (!cited.every((issue) => /^\d+$/.test(issue))) throw new Error('--decision takes an issue number.');
     saveLedger({ ...loadLedger(), decisions: cited });
+  }
+  const worker = option(args, '--worker');
+  if (worker !== null) {
+    if (!MODEL_NAME.test(worker)) throw new Error('--worker takes a model name.');
+    saveLedger({ ...loadLedger(), worker });
   }
   const ctx = context();
   const ledger = loadLedger();

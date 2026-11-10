@@ -1,5 +1,6 @@
 // Deterministic tier calculation. AI can raise the result through the verdict
 // block but nothing can lower it.
+import { WORKFLOW_PATHS, authority } from './authority.mjs';
 import { readBlob } from './git.mjs';
 import { matchesAny, normalizePath } from './paths.mjs';
 
@@ -25,6 +26,8 @@ export function scriptsChanged(changes, baseRef, headRef, cwd) {
     .map((c) => c.path);
 }
 
+// Besides the tier and its reasons, classify returns `flags`: the facts a delegate's
+// approval depends on, as data rather than text.
 export function classify({
   changes,
   config,
@@ -39,11 +42,30 @@ export function classify({
   const paths = changes.map((c) => c.path);
   const isAdmin = config.admins.includes(author);
   const isTrustedBot = (config.trustedBots ?? []).includes(author);
+  // Empty unless a delegate is configured.
+  const { adminOnlyPaths } = authority(config);
+  const flags = {
+    external: false,
+    adminOnly: [],
+    scripts: [...scriptsChangedIn],
+    symlinks: [],
+    raised: Boolean(aiRaise),
+    // Only read when a delegate is configured. See WORKFLOW_PATHS.
+    workflows: paths.filter((path) => matchesAny(path, WORKFLOW_PATHS)),
+  };
 
-  if (!isAdmin && !isTrustedBot) reasons.push(`External author: ${author}`);
+  if (!isAdmin && !isTrustedBot) {
+    reasons.push(`External author: ${author}`);
+    flags.external = true;
+  }
 
   for (const path of paths) {
     if (matchesAny(path, tiers.t2Paths)) reasons.push(`Protected path: ${path}`);
+    // Admin-only paths are T2 too, or a change to one could auto-merge at T1.
+    if (matchesAny(path, adminOnlyPaths)) {
+      reasons.push(`Admin-only path: ${path}`);
+      flags.adminOnly.push(path);
+    }
   }
   for (const path of scriptsChangedIn) reasons.push(`package.json scripts changed: ${path}`);
 
@@ -51,6 +73,7 @@ export function classify({
   for (const change of changes) {
     if (change.newMode === '120000' || change.newMode === '160000') {
       reasons.push(`Symlink or submodule: ${change.path}`);
+      flags.symlinks.push(change.path);
     }
   }
 
@@ -61,12 +84,12 @@ export function classify({
 
   if (aiRaise) reasons.push(`Raised by council: ${aiRaise.reason ?? 'no reason given'}`);
 
-  if (reasons.length > 0) return { tier: 2, reasons };
+  if (reasons.length > 0) return { tier: 2, reasons, flags };
 
-  if (cleanRevert) return { tier: 0, reasons: ['Verified clean revert'] };
+  if (cleanRevert) return { tier: 0, reasons: ['Verified clean revert'], flags };
 
   if (paths.length > 0 && decisionPaths.length === paths.length) {
-    return { tier: 0, reasons: ['Decision record citing /decide'] };
+    return { tier: 0, reasons: ['Decision record citing /decide'], flags };
   }
 
   const docsOnly =
@@ -77,7 +100,7 @@ export function classify({
         matchesAny(c.path, tiers.t0Paths) &&
         !matchesAny(c.path, tiers.t0Exclude),
     );
-  if (docsOnly) return { tier: 0, reasons: ['Markdown docs only'] };
+  if (docsOnly) return { tier: 0, reasons: ['Markdown docs only'], flags };
 
-  return { tier: 1, reasons: ['Default tier'] };
+  return { tier: 1, reasons: ['Default tier'], flags };
 }

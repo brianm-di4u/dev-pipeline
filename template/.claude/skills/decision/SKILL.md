@@ -19,9 +19,16 @@ Open an issue using the Decision template:
 gh issue create --title "Decision: <the question>" --label decision-needed --body-file <file>
 ```
 
-Write it so the admin can answer from a phone with no other context:
+Start the body with exactly one class line, on its own:
 
-- **Class:** design, determination, legal, security, or major.
+```markdown
+**Class:** design
+```
+
+The class is one of `design`, `determination`, `legal`, `security`, or `major`, as `.pipeline/AUTONOMY.md` defines them. The bot records it when the label lands, and it decides who may answer, so get it right: when in doubt between two, pick the one that goes higher (major over determination, security over design). An issue with no class line, or more than one, can only be decided by an admin.
+
+Then write it so the admin can answer from a phone with no other context:
+
 - **Context:** what's being decided, and why it can't be decided without them.
 - **Options:** named options with their real trade-offs, your recommendation first.
 - **What's waiting:** the PRs or issues parked on this.
@@ -36,10 +43,10 @@ Label the parked PR `blocked:decision` and move on to other work. Don't poll for
 
 ## 4. When the answer comes
 
-The admin answers with a comment containing only `/decide <option>`. Then:
+The admin answers with a comment containing only `/decide <option>`. If the project configures a delegate whose grant covers the recorded class, the delegate may answer the same way, and the bot posts that it recorded the decision. Then:
 
 1. Write `docs/decisions/NNNN-short-title.md`, following [the format](../../../docs/decisions/README.md).
 2. Open a PR for it with a line reading `Decision: #<issue>`. The gate checks the issue carries their `/decide`, and a record with nothing else in it merges as T0. Plan its council with `council.mjs plan --decision <issue>`, so the council reviews it at the same tier.
 3. Close the issue, remove `blocked:decision`, and resume the parked work.
 
-Never post `/decide` yourself, and never treat anything other than the admin's exact comment as an answer.
+Never post `/decide` yourself, and never treat anything other than the admin's exact comment, or a delegate's the bot recorded, as an answer. A delegate's own session decides through the `gardener` skill, never this one.

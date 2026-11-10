@@ -7,7 +7,7 @@
 //   pipeline protect [--repo owner/name] [--off]
 //   pipeline doctor [--repo owner/name]
 //   pipeline update [--check]
-//   pipeline metrics [--repo owner/name]
+//   pipeline metrics [--repo owner/name] [--since YYYY-MM-DD] [--extended]
 //   pipeline packs
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -359,6 +359,30 @@ async function adoptProject({ positional, flags }) {
 }
 
 const AGENT_LABELS = { 'decision-needed': 'fbca04', 'blocked:decision': 'fbca04', triage: 'd93f0b' };
+// Only a project with a delegate in its config gets these.
+export const DELEGATE_LABELS = {
+  'admin-needed': 'b60205',
+  garden: '0e8a16',
+  'complexity:high': '5319e7',
+  'complexity:low': 'c5def5',
+  'pipeline:delegate-suspended': 'b60205',
+  'pipeline:delegate-touched': 'd93f0b',
+  'pipeline:delegate-approved': 'c5def5',
+  'pipeline:delegate-rearmed': 'c5def5',
+};
+
+export function labelsFor(config) {
+  const delegated = Array.isArray(config?.delegates) && config.delegates.length > 0;
+  return delegated ? { ...AGENT_LABELS, ...DELEGATE_LABELS } : AGENT_LABELS;
+}
+
+function localConfig(dir) {
+  try {
+    return JSON.parse(readFileSync(join(resolve(dir ?? '.'), 'pipeline.config.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
 
 function ghApi(args, input) {
   const result = spawnSync('gh', ['api', ...args], {
@@ -429,7 +453,7 @@ async function protect({ flags }) {
       // and the bot only makes the labels it applies itself.
       'Labels agents file under',
       () => {
-        for (const [name, color] of Object.entries(AGENT_LABELS)) {
+        for (const [name, color] of Object.entries(labelsFor(localConfig(flags.dir)))) {
           const made = ghApi(['-X', 'POST', `repos/${repo}/labels`, '-f', `name=${name}`, '-f', `color=${color}`]);
           if (!made.ok && !/already_exists/.test(made.stdout + made.stderr)) return made;
         }
@@ -583,18 +607,38 @@ async function doctor({ flags }) {
     add('warn', 'GitHub', 'no remote repo found');
   }
 
-  const scopes = spawnSync('gh', ['api', '-i', 'user'], { encoding: 'utf8' }).stdout ?? '';
-  const classic = /^x-oauth-scopes:\s*(.*)$/im.exec(scopes)?.[1]?.trim();
-  if (classic && /\brepo\b/.test(classic)) {
-    add('warn', 'Agent token', `gh holds a broad token (${classic}). Give agents the restricted token: see docs/AGENT-TOKEN.md in dev-pipeline.`);
-  } else {
-    add('ok', 'Agent token', 'gh is not using a broad classic or OAuth token');
-  }
+  const token = tokenCheck(spawnSync('gh', ['api', '-i', 'user'], { encoding: 'utf8' }).stdout ?? '', config);
+  add(token.level, token.name, token.detail);
 
   const mark = { ok: 'ok   ', warn: 'warn ', fail: 'FAIL ' };
   for (const { level, name, detail } of results) console.log(`${mark[level]} ${name}${detail ? `: ${detail}` : ''}`);
   console.log(`\nEnforcement level: ${enforcement}`);
   return results.some((r) => r.level === 'fail') ? 1 : 0;
+}
+
+// What `gh api -i user` says about the token this session holds. A delegate is its
+// own account on a repo it's a collaborator on, where fine-grained tokens don't
+// work, so a classic token is expected there.
+export function tokenCheck(response, config) {
+  const classic = /^x-oauth-scopes:\s*(.*)$/im.exec(response)?.[1]?.trim();
+  const login = /"login"\s*:\s*"([^"]+)"/.exec(response)?.[1] ?? null;
+  const delegates = Array.isArray(config?.delegates) ? config.delegates : [];
+  const delegate = login && delegates.find((entry) => typeof entry?.login === 'string' && entry.login.toLowerCase() === login.toLowerCase());
+  if (delegate && !(config.admins ?? []).some((admin) => admin.toLowerCase() === login.toLowerCase())) {
+    return {
+      level: 'ok',
+      name: 'Delegate token',
+      detail: `${login} is a delegate in pipeline.config.json, so a classic token is expected (scopes: ${classic || 'none reported'}). It should have only public_repo and workflow.`,
+    };
+  }
+  if (classic && /\brepo\b/.test(classic)) {
+    return {
+      level: 'warn',
+      name: 'Agent token',
+      detail: `gh holds a broad token (${classic}). Give agents the restricted token: see docs/AGENT-TOKEN.md in dev-pipeline.`,
+    };
+  }
+  return { level: 'ok', name: 'Agent token', detail: 'gh is not using a broad classic or OAuth token' };
 }
 
 // Updates managed files in the current project. A file changed since the last
@@ -657,7 +701,14 @@ async function metrics({ flags }) {
   const bot = encodeURIComponent('github-actions[bot]');
   const botIssues = (client, name, label, state = 'open') =>
     client.list(`/repos/${name}/issues?state=${state}&labels=${encodeURIComponent(label)}&creator=${bot}&per_page=100`);
-  const data = await buildDigest({ client: cliClient(), repo, config, now: new Date(), botIssues });
+  // --since sets the start, for a baseline. --extended adds the delegate measures,
+  // such as approval wait, even before a delegate is configured.
+  let since = null;
+  if (typeof flags.since === 'string') {
+    if (Number.isNaN(Date.parse(flags.since))) throw new Error(`--since takes a date, such as 2026-11-07, not ${flags.since}`);
+    since = new Date(flags.since).toISOString();
+  }
+  const data = await buildDigest({ client: cliClient(), repo, config, now: new Date(), botIssues, since, extended: flags.extended === true });
   console.log(renderDigest(data, config));
   return 0;
 }

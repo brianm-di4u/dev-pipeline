@@ -30,6 +30,8 @@
       "Read(~/.claude/.credentials.json)",
       "Read(~/.config/gh/**)",
       "Read(~/AppData/Roaming/GitHub CLI/**)",
+      "Read(**/.claude/settings.local.json)",
+      "Read(//**/.claude/settings.local.json)",
       "Read(./evals/review/_starter/cases.mjs)",
       "Read(./evals/review/cases/**)",
       "mcp__terminal__run_in_terminal",

@@ -10,17 +10,28 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { authority } from './lib/authority.mjs';
 import { parseConfig } from './lib/config.mjs';
-import { hasRearm, findDecision, findApproval, parseVerdict } from './lib/contract.mjs';
+import {
+  actorOf,
+  approvedHash,
+  delegateRefusals,
+  findApproval,
+  findDecision,
+  isApproveCommand,
+  parseVerdict,
+  touchMarkers,
+} from './lib/contract.mjs';
 import { evaluateGate } from './lib/gate-core.mjs';
 import { changeSet, git, readBlob, tryGit } from './lib/git.mjs';
 import { cliClient, tokenClient } from './lib/github.mjs';
 import { claimedRevert, verifyCleanRevert } from './lib/revert.mjs';
+import { readRepoState } from './lib/state.mjs';
 import { classify, scriptsChanged } from './lib/tier.mjs';
 
 export const CHECK_NAME = 'pipeline/gate';
 const BOT = 'github-actions[bot]';
-const encodedBot = encodeURIComponent(BOT);
+export const TOUCHED_LABEL = 'pipeline:delegate-touched';
 
 export async function resolvePrNumbers(eventName, event, client, repo) {
   switch (eventName) {
@@ -58,39 +69,108 @@ export function pickCheck(checkRuns, names) {
   return verdicts.find((v) => v !== 'success') ?? 'success';
 }
 
-async function repoState(client, repo, config, body) {
-  const redIssues = await client.list(
-    `/repos/${repo}/issues?state=open&labels=pipeline:main-red&creator=${encodedBot}&per_page=20`,
-  );
-  const citesMainRed = redIssues.some((issue) =>
-    new RegExp(`^Fixes-main-red:\\s*#${issue.number}\\s*$`, 'im').test(body ?? ''),
-  );
-
-  const breakerIssues = await client.list(
-    `/repos/${repo}/issues?state=all&labels=pipeline:breaker&creator=${encodedBot}&per_page=20`,
-  );
-  let breakerTripped = false;
-  const latest = breakerIssues.sort((a, b) => b.number - a.number)[0];
-  if (latest) {
-    if (latest.state === 'open') {
-      breakerTripped = true;
-    } else {
-      // A closed breaker counts as re-armed only if an admin posted /rearm.
-      const comments = await client.list(`/repos/${repo}/issues/${latest.number}/comments?per_page=100`);
-      breakerTripped = !hasRearm(comments, config.admins);
+// What a delegate's approval depends on beyond the change itself: who is on the
+// PR's commits, and whether a delegate pushed to it or edited its body. The bot
+// marks a touch with a comment and a label. Anyone with write access can delete
+// the comment or remove the label, but nobody can delete the `labeled` event, so
+// that counts too.
+//
+// The markers depend on a gate run, which the workflow's concurrency group can
+// cancel while it waits, so the gate also reads the record GitHub keeps itself:
+// pushes to the head branch from the repository activity log, and body edits from
+// the PR's edit history. Activity before the PR opened is the workflow relay rule,
+// and doesn't count. A commit with no linked GitHub user (author null) is no one's.
+export async function delegateInputs(client, repo, number, comments, { pr = null, config = null } = {}) {
+  const commits = await client.list(`/repos/${repo}/pulls/${number}/commits?per_page=100`);
+  const commitLogins = [
+    ...new Set(commits.flatMap((commit) => [commit.author?.login, commit.committer?.login]).filter(Boolean)),
+  ];
+  const events = await client.list(`/repos/${repo}/issues/${number}/events?per_page=100`);
+  const labelled = events
+    .filter((event) => event.event === 'labeled' && event.label?.name === TOUCHED_LABEL && event.actor?.login === BOT)
+    .map((event) => ({ kind: 'label', login: null, at: event.created_at }));
+  // If GitHub's own records can't be read, a delegate's approval can't count, but
+  // the gate still runs, so an admin's approval still works.
+  let recorded = [];
+  let historyUnreadable = false;
+  if (pr && config) {
+    try {
+      recorded = await recordedTouches(client, repo, number, pr, config);
+    } catch (error) {
+      console.error(`Could not read the push and edit history of #${number}: ${error.message}`);
+      historyUnreadable = true;
     }
   }
-  return { mainRed: redIssues.length > 0, citesMainRed, breakerTripped };
+  return { commitLogins, touches: [...touchMarkers(comments), ...labelled, ...recorded], historyUnreadable };
 }
 
-async function citedDecision(client, repo, config, body) {
+const EDITS_QUERY =
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){userContentEdits(first:100){nodes{editedAt editor{login}}}}}}';
+
+async function recordedTouches(client, repo, number, pr, config) {
+  const auth = authority(config);
+  const opened = Date.parse(pr.created_at);
+  const touches = [];
+  if (pr.head?.repo?.full_name === repo) {
+    const ref = encodeURIComponent(`refs/heads/${pr.head.ref}`);
+    const activity = await client.list(`/repos/${repo}/activity?ref=${ref}&per_page=100`);
+    for (const entry of activity) {
+      const pushed = ['push', 'force_push'].includes(entry.activity_type);
+      if (pushed && Date.parse(entry.timestamp) > opened && auth.delegateOf(entry.actor?.login)) {
+        touches.push({ kind: 'push', login: entry.actor.login, at: entry.timestamp });
+      }
+    }
+  }
+  const [owner, name] = repo.split('/');
+  const response = await client.post('/graphql', { query: EDITS_QUERY, variables: { owner, name, number } });
+  const edits = response?.data?.repository?.pullRequest?.userContentEdits?.nodes;
+  if (!Array.isArray(edits)) throw new Error(`Could not read the edit history of #${number}`);
+  for (const change of edits) {
+    if (Date.parse(change.editedAt) > opened && auth.delegateOf(change.editor?.login)) {
+      touches.push({ kind: 'body', login: change.editor.login, at: change.editedAt });
+    }
+  }
+  return touches;
+}
+
+// pull_request_target carries who caused the event. A delegate that pushes to a
+// PR, or edits its body, can't then approve it: the bot marks the PR for good.
+export function touchOf(eventName, event, config) {
+  if (eventName !== 'pull_request_target') return null;
+  const sender = event.sender?.login;
+  if (!sender || event.sender?.type === 'Bot' || !authority(config).delegateOf(sender)) return null;
+  if (event.action === 'synchronize') return { kind: 'push', login: sender };
+  if (event.action === 'edited' && event.changes?.body) return { kind: 'body', login: sender };
+  return null;
+}
+
+export async function markTouch(client, repo, number, touch) {
+  const what = touch.kind === 'push' ? 'pushed to' : 'edited the body of';
+  await client.post(`/repos/${repo}/issues/${number}/comments`, {
+    body: `Delegate ${touch.login} ${what} this PR, so no delegate approval of it counts from now on. An admin can still approve it.\n\n<!-- pipeline:delegate-touch kind=${touch.kind} login=${touch.login} -->`,
+  });
+  await client.post(`/repos/${repo}/issues/${number}/labels`, { labels: [TOUCHED_LABEL] });
+}
+
+// A delegate's /decide counts only with the suspension state, which `ctx` carries.
+// With a delegate configured, it also reads each issue's author and events, which
+// a delegate's /decide needs.
+async function citedDecision(client, repo, config, body, ctx = {}) {
   const issues = [...(body ?? '').matchAll(/^Decision:\s*#(\d+)\s*$/gim)].map((m) => m[1]);
   if (issues.length === 0) return false;
+  const delegated = authority(config).delegates.length > 0;
   for (const issue of issues) {
     const comments = await client.list(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
-    if (!findDecision(comments, config.admins)) return false;
+    const context = delegated ? { ...ctx, ...(await decisionContext(client, repo, issue)) } : ctx;
+    if (!findDecision(comments, config, context)) return false;
   }
   return true;
+}
+
+export async function decisionContext(client, repo, number) {
+  const issue = await client.get(`/repos/${repo}/issues/${number}`);
+  const events = await client.list(`/repos/${repo}/issues/${number}/events?per_page=100`);
+  return { issueAuthor: issue?.user?.login ?? null, events };
 }
 
 export async function gather({ client, repo, number, cwd, localEvidence = false }) {
@@ -123,9 +203,13 @@ export async function gather({ client, repo, number, cwd, localEvidence = false 
     ? verifyCleanRevert({ claimed, changes, baseRef, config, cwd }).ok
     : false;
 
-  const adrCited = await citedDecision(client, repo, config, pr.body);
+  const state = await readRepoState(client, repo, config, pr.body);
+  // Only with a delegate configured does the gate read anything more than before.
+  const delegated = authority(config).delegates.length > 0;
+  const suspension = delegated ? { suspended: state.suspended, suspensions: state.suspensions } : {};
+  const adrCited = await citedDecision(client, repo, config, pr.body, suspension);
   const comments = await client.list(`/repos/${repo}/issues/${number}/comments?per_page=100`);
-  const state = await repoState(client, repo, config, pr.body);
+  const extra = delegated ? { ...(await delegateInputs(client, repo, number, comments, { pr, config })), ...suspension } : {};
 
   let verify;
   if (localEvidence) {
@@ -154,7 +238,10 @@ export async function gather({ client, repo, number, cwd, localEvidence = false 
     cleanRevert,
     adrCited,
     defaultBranch,
-    ...state,
+    mainRed: state.mainRed,
+    citesMainRed: state.citesMainRed,
+    breakerTripped: state.breakerTripped,
+    ...extra,
   };
 }
 
@@ -165,7 +252,9 @@ function readLocalEvidence(hash, cwd = process.cwd()) {
   return evidence.ok ? 'success' : 'failure';
 }
 
-async function publish(client, repo, input, result) {
+// A re-publish from post-merge, audit or decisions is marked as one, so the
+// forged-gate check can tell it from a check that some other workflow wrote.
+export function checkRunBody(input, result, runId = process.env.GITHUB_RUN_ID, { republish = false } = {}) {
   const body = {
     name: CHECK_NAME,
     head_sha: input.pr.head,
@@ -174,21 +263,86 @@ async function publish(client, repo, input, result) {
     output: { title: result.title, summary: result.summary },
   };
   if (result.conclusion) body.conclusion = result.conclusion;
-  await client.post(`/repos/${repo}/check-runs`, body);
+  // With a delegate configured, stamp the check with this run, so post-merge can
+  // tell it from one a pushed workflow wrote. See lib/delegates.mjs.
+  if (authority(input.config).delegates.length > 0 && runId) body.external_id = `${republish ? 'republish:' : ''}${runId}`;
+  return body;
 }
 
-// One account can't be told apart from its agents, so every approval gets an
-// immediate notification. The bot's @mention reaches the owner; their own
-// comment doesn't.
-async function echoApproval(client, repo, input, event) {
+async function publish(client, repo, input, result, options) {
+  await client.post(`/repos/${repo}/check-runs`, checkRunBody(input, result, undefined, options));
+}
+
+// Evaluate and publish again, for when state outside the PR changed: a delegate
+// suspension voids approvals that already turned checks green.
+export async function reevaluate(client, repo, numbers, cwd = process.cwd()) {
+  const results = [];
+  for (const number of numbers) {
+    const pr = await client.get(`/repos/${repo}/pulls/${number}`);
+    if (pr.state !== 'open') continue;
+    try {
+      const input = await gather({ client, repo, number, cwd });
+      const result = evaluateGate(input);
+      await publish(client, repo, input, result, { republish: true });
+      results.push({ number, conclusion: result.conclusion ?? result.status });
+    } catch (error) {
+      console.error(error);
+      // Without checks: write this fails too. Say so, rather than throw from here.
+      const runId = process.env.GITHUB_RUN_ID;
+      await client
+        .post(`/repos/${repo}/check-runs`, {
+          name: CHECK_NAME,
+          head_sha: pr.head.sha,
+          status: 'completed',
+          conclusion: 'failure',
+          ...(runId ? { external_id: `republish:${runId}` } : {}),
+          output: { title: 'Gate error', summary: 'The gate could not evaluate this PR. See the workflow log.' },
+        })
+        .catch((failure) => console.error(`Could not publish the gate error for #${number}: ${failure.message}`));
+      results.push({ number, conclusion: 'error' });
+    }
+  }
+  return results;
+}
+
+// One account can't be told apart from its agents, so every admin approval gets
+// an immediate notification. The bot's @mention reaches the owner; their own
+// comment doesn't. A delegate is its own account, so its approval is recorded
+// without a ping, and one that doesn't count gets the reason.
+export function approvalNotice(comment, input, result) {
+  const short = input.hash.slice(0, 12);
+  const auth = authority(input.config);
+  const role = actorOf(comment, auth);
+  if (role === 'admin') {
+    if (!findApproval([comment], input.config.admins, input.hash)) return null;
+    const mentions = input.config.admins.map((login) => `@${login}`).join(' ');
+    return `${mentions} approval recorded for change \`${short}\`. If you didn't post it, close this PR and investigate.`;
+  }
+  if (role !== 'delegate' || !isApproveCommand(comment)) return null;
+  const login = comment.user.login;
+  if (!input.hash.startsWith(approvedHash(comment))) {
+    return `The approval by ${login} is for different content. This PR's change is \`${short}\`.`;
+  }
+  const ctx = {
+    flags: result?.delegate?.flags,
+    author: input.pr.author,
+    commitLogins: input.commitLogins,
+    touches: input.touches,
+    historyUnreadable: input.historyUnreadable,
+    suspended: input.suspended,
+    suspensions: input.suspensions,
+  };
+  const [refusal] = delegateRefusals([comment], auth, input.hash, ctx);
+  if (refusal) return `The approval by ${login} doesn't count: ${refusal.reasons.join('; ')}.`;
+  return `Delegate approval by ${login} recorded for \`${short}\`.`;
+}
+
+async function echoApproval(client, repo, input, event, result) {
   const comment = event.comment;
   if (!comment || event.action !== 'created') return;
-  const approval = findApproval([comment], input.config.admins, input.hash);
-  if (!approval) return;
-  const mentions = input.config.admins.map((login) => `@${login}`).join(' ');
-  await client.post(`/repos/${repo}/issues/${input.pr.number}/comments`, {
-    body: `${mentions} approval recorded for change \`${input.hash.slice(0, 12)}\`. If you didn't post it, close this PR and investigate.`,
-  });
+  const body = approvalNotice(comment, input, result);
+  if (!body) return;
+  await client.post(`/repos/${repo}/issues/${input.pr.number}/comments`, { body });
 }
 
 async function runCi() {
@@ -211,11 +365,23 @@ async function runCi() {
 
   const numbers = await resolvePrNumbers(eventName, event, client, repo);
   if (numbers.length === 0) console.log('No open PR for this event.');
+  // This job runs on a checkout of the default branch, so its config is policy.
+  // A delegate's touch is marked before evaluating, so this run already counts it.
+  // A config that can't be read here fails in gather, per PR, as it always has.
+  let touch = null;
+  if (eventName === 'pull_request_target') {
+    try {
+      touch = touchOf(eventName, event, parseConfig(readFileSync('pipeline.config.json', 'utf8'), { warn: () => {} }));
+    } catch {
+      touch = null;
+    }
+  }
   let failed = false;
   for (const number of numbers) {
     const pr = await client.get(`/repos/${repo}/pulls/${number}`);
     if (pr.state !== 'open') continue;
     try {
+      if (touch) await markTouch(client, repo, number, touch);
       const input = await gather({ client, repo, number, cwd: process.cwd() });
       const result = evaluateGate(input);
       await publish(client, repo, input, result);
@@ -223,7 +389,7 @@ async function runCi() {
       if (eventName === 'issue_comment') {
         // A failed notification must not change the merge decision, which is
         // already published. It fails the job instead, so it stays visible.
-        await echoApproval(client, repo, input, event).catch((error) => {
+        await echoApproval(client, repo, input, event, result).catch((error) => {
           failed = true;
           console.error(`Could not post the approval notice: ${error.message}`);
         });

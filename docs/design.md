@@ -28,6 +28,7 @@ What this template does, where each capability came from, what's been proven, an
 | Digest and metrics | `.pipeline/lib/digest.mjs`, `audit.yml` | Post's human-time metrics; commentary on wait time |
 | Reviewer evals | `evals/review/`, `.pipeline/eval.mjs` | Post; [hillclimbing guidance](https://claude.dev/blog/automating-eval-design-and-hillclimbing/) |
 | Autopilot | `autopilot` skill, `.pipeline/lib/queue.mjs` | Owner's operating model; [agent automations guidance](https://claude.dev/blog/building-effective-agent-automations/) |
+| Delegate approver ("gardener") | `.pipeline/lib/authority.mjs`, `.pipeline/garden.mjs`, `gardener` skill | Owner's operating model: a second account that holds part of the admin's authority |
 | Inception | `start-project` skill | Owner's own session brief |
 | License and acceptance checks | `.pipeline/check-licenses.mjs`, `check-acceptance.mjs` | Owner's own session brief |
 | Release, incident, retirement | `release`, `incident`, `retire` skills | Neither source. Needed for the full lifecycle |
@@ -48,6 +49,12 @@ What this template does, where each capability came from, what's been proven, an
 
 **A bot @mention is the only notification.** GitHub doesn't notify you of your own account's actions, and agents act as you.
 
+**Delegates are optional.** A `delegates` list in `pipeline.config.json` names other GitHub accounts and the commands each may post: `approve`, `decide` for some decision classes, `rearm`, and `direct` for issues that start work. With no list, nothing changes, and tests compare the gate against a frozen copy of the code from before the feature. A delegate's command counts only within its grant. It can't approve a change to an admin-only path (a built-in floor covering the files that define its own authority, plus `tiers.adminOnlyPaths`), a symlink, changed `package.json` scripts, an outside author's PR, or a PR it opened, committed to, pushed to, or edited. It can't approve a change to `.github/workflows/**` or `.github/actions/**` unless its grant sets `approveWorkflows`, because a merged workflow with `checks: write` could write `pipeline/gate` from main for good. `.claude/agents/**` and `.claude/workflows/**` stay approvable by a delegate. A project that wants them held for an admin adds them to `tiers.adminOnlyPaths`. A delegate decides only on decision issues an admin opened, because anyone can open one from the issue form on a public repo.
+
+**Records a delegate can't undo.** Where something must stay true after the fact, the bot records it as a label, because a label's `labeled` event can't be deleted, even when a comment can. That covers a delegate's touch on a PR, a merge the gate let through on a delegate's approval (`pipeline:delegate-approved`, from the check's own record of whose approval it relied on), and a delegate's re-arm (`pipeline:delegate-rearmed`). What a bot state issue is, a red main, a breaker or a suspension, comes from the bot's own `labeled` event, not from a label or title anyone can edit.
+
+**The bot records a decision's class.** When `decision-needed` lands, the bot posts the class it read from the issue body in a hidden marker, and the earliest unedited marker is the record, so editing the body later can't lower it. No class, an ambiguous one, or an edited bot comment means only an admin can decide. A delegate's `/decide` within its grant also lets the decision record merge at T0, as an admin's does. That is intended: the record writes down a decision already made within the grant.
+
 **No AI and no secrets in CI.** The council runs locally on a subscription, so a public repo's CI has nothing to steal.
 
 ## Risks the owner is accepting
@@ -58,6 +65,13 @@ What this template does, where each capability came from, what's been proven, an
 - **Council verdicts in CI are self-reported,** since no AI runs there. The gate checks that a verdict matches the change, not that the review truly happened. Red main, smoke checks, and evals are the independent signal.
 - **Private repos on Free have no enforcement at all,** which is why agents stop at ready there by default.
 - **The guard hook is a pattern match.** A script written to disk can evade it. The restricted token is what limits the damage.
+- **A delegate's `workflow` scope can forge the gate.** A pushed workflow can write a check named `pipeline/gate`. So a delegate's limits hold against mistakes and stale judgement, not against a deliberate bypass or a successful prompt injection. The forged-gate check after each merge catches only a naive forgery, and only after the fact. A workflow written to pass it, for example by reusing a live gate run's id, would. Dropping the scope removes this, at the cost of workflow pushes staying with the owner.
+- **The opener sets a decision's class.** The bot records it when the label lands, so a delegate can't lower it by editing the body later, but a worker can mis-class at filing. The gardener re-judges every class and escalates when it disagrees.
+- **Markers in bot comments hold against mistakes, not deletion.** Anyone with write access can delete a comment, including the bot's. The delegate-touch marker is backed by a label event, which nobody can delete. The decision-class record and the re-arm offer are comments only.
+- **A delegate's token sits in a file its OS user can read.** Any process running as the owner's Windows user can read the delegate clone's `.claude/settings.local.json`. The template denies agents a `Read` of it and the guard blocks commands that name it, but a script can still read it. A separate OS user for the delegate is the fix.
+- **Releases stay the owner's by policy, not by token.** The guard blocks release commands in a delegate's session, and `release.yml` runs only for the owner. That prevents accidents. It doesn't stop any account with write access creating a release through the API.
+- **A delegate may approve a worker's PR for an issue the delegate filed.** With `direct`, a delegate's issue can start work, and the gate doesn't stop it approving the resulting PR, which it neither opened nor pushed to. The admin's reactions to its rationale, and the revert rate, are the check.
+- **A closed state issue disguised as another kind can hide.** To keep reads few, a closed bot issue whose label and title say it is a digest or an audit issue is taken at its word. Changing both on a closed breaker or suspension issue would hide it. Open issues, and issues that look like no kind at all, are always checked against the bot's own events.
 
 ## Verification record
 

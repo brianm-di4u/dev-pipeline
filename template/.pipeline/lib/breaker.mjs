@@ -36,3 +36,11 @@ export function evaluateBreaker({ merges, redIssues, config, since = null }) {
     red: red.map((issue) => issue.number),
   };
 }
+
+// A delegate may re-arm a trip once per window. The bot doesn't offer it again
+// when a delegate re-armed the previous trip and fewer than a full window of
+// ordinary merges have counted since: that second trip needs an admin.
+export function delegateMayRearm({ result, previousRearm, config }) {
+  if (previousRearm?.role !== 'delegate') return true;
+  return result.window >= (config.breaker?.window ?? 20);
+}

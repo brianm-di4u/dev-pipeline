@@ -12,10 +12,9 @@ import { join } from 'node:path';
 import { loadConfig } from './lib/config.mjs';
 import { cliClient } from './lib/github.mjs';
 import { nextAction, recordOutcome } from './lib/queue.mjs';
-import { hasRearm } from './lib/contract.mjs';
+import { readRepoState } from './lib/state.mjs';
 
 const RUN_PATH = join('.pipeline', 'runs', 'autopilot.json');
-const BOT = encodeURIComponent('github-actions[bot]');
 
 function loadRun() {
   return existsSync(RUN_PATH) ? JSON.parse(readFileSync(RUN_PATH, 'utf8')) : { consecutiveFailures: 0, history: [] };
@@ -36,15 +35,8 @@ async function next() {
     const client = cliClient();
     const repo = execFileSync('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], { encoding: 'utf8' }).trim();
     const issues = await client.list(`/repos/${repo}/issues?state=open&labels=ready&per_page=100`);
-    const red = await client.list(`/repos/${repo}/issues?state=open&labels=pipeline:main-red&creator=${BOT}&per_page=10`);
-    const breakers = await client.list(`/repos/${repo}/issues?state=all&labels=pipeline:breaker&creator=${BOT}&per_page=10`);
-    const latest = breakers.sort((a, b) => b.number - a.number)[0];
-    let breakerTripped = false;
-    if (latest) {
-      breakerTripped =
-        latest.state === 'open' ||
-        !hasRearm(await client.list(`/repos/${repo}/issues/${latest.number}/comments?per_page=100`), config.admins);
-    }
+    // The same reader as the gate, so the two can't disagree about red main or the breaker.
+    const { mainRed, redIssue, breakerTripped } = await readRepoState(client, repo, config);
     const pulls = await client.list(`/repos/${repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=50`);
     const open = await client.list(`/repos/${repo}/pulls?state=open&base=main&per_page=50`);
     // Dependency bumps need the same review, so they're worked like the agents' own PRs.
@@ -52,7 +44,7 @@ async function next() {
     const openOwnPrs = open
       .filter((pr) => workable.includes(pr.user.login) && !pr.labels.some((l) => ['blocked:decision', 'parked'].includes(l.name)))
       .map((pr) => pr.number);
-    state = { issues, mainRed: red.length > 0, redIssue: red[0]?.number ?? null, breakerTripped, merges: pulls, openOwnPrs };
+    state = { issues, mainRed, redIssue, breakerTripped, merges: pulls, openOwnPrs };
   } catch (error) {
     state = { sourceError: error.message, issues: [], merges: [], openOwnPrs: [] };
   }

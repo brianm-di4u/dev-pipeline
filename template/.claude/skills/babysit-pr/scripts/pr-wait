@@ -74,8 +74,48 @@ def _pipeline_config() -> dict[str, Any]:
         return {}
 
 
+DECISION_CLASSES = ("design", "determination", "legal", "security", "major")
+# A GitHub login, as .pipeline/lib/authority.mjs checks it.
+LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
+
+
+# Delegates as .pipeline/lib/authority.mjs keeps them: a malformed entry, or one
+# that is also an admin, grants nothing. Logins compare without case.
+def _delegates(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    entries = config.get("delegates")
+    admins = {str(a).lower() for a in config.get("admins", [])}
+    paths = config.get("tiers", {}).get("adminOnlyPaths") if isinstance(config.get("tiers"), dict) else None
+    if not isinstance(entries, list) or (paths is not None and not (isinstance(paths, list) and all(isinstance(p, str) for p in paths))):
+        return {}
+    kept: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("login"), str) or not LOGIN.match(entry["login"]):
+            continue
+        login = entry["login"].lower()
+        if login in admins or login in kept:
+            continue
+        if any(flag in entry and not isinstance(entry[flag], bool) for flag in ("approve", "approveExternal", "approveWorkflows", "rearm", "direct")):
+            continue
+        decide = entry.get("decide", [])
+        if not isinstance(decide, list) or not all(c in DECISION_CLASSES for c in decide):
+            continue
+        kept[login] = entry
+    return kept
+
+
 CONFIG = _pipeline_config()
 ADMINS = frozenset(CONFIG.get("admins", []))
+DELEGATES = _delegates(CONFIG)
+# A delegate with `direct` can direct agents, so its words aren't flagged untrusted.
+DIRECT = frozenset(login for login, grant in DELEGATES.items() if grant.get("direct") is True)
+
+
+def trusted(login: str | None) -> bool:
+    return login in ADMINS or (login or "").lower() in DIRECT
+
+
+def is_delegate(login: str | None) -> bool:
+    return (login or "").lower() in DELEGATES
 GATING_BOTS = tuple(CONFIG.get("reviewBots", {}).get("gating", []))
 ADVISORY_BOTS = tuple(CONFIG.get("reviewBots", {}).get("advisory", []))
 OWNER_COMMANDS = re.compile(r"^/(approve|decide|rearm)\b")
@@ -425,9 +465,12 @@ class Watcher:
             if login in ADMINS and OWNER_COMMANDS.match(comment["body"].strip()):
                 self.emit(f"c:{comment['id']}", f"owner command from {login}: {snippet(comment['body'])} {comment['url']}")
                 continue
+            if is_delegate(login) and OWNER_COMMANDS.match(comment["body"].strip()):
+                self.emit(f"c:{comment['id']}", f"delegate command from {login}: {snippet(comment['body'])} {comment['url']}")
+                continue
             if login in mine or bot_name(login) or (is_bot and any(b in login for b in STATUS_BOTS)):
                 continue
-            tag = "" if login in ADMINS else " [untrusted]"
+            tag = "" if trusted(login) else " [untrusted]"
             self.emit(f"c:{comment['id']}", f"comment from {login}{tag}: {snippet(comment['body'])} {comment['url']}")
         for review in reviews:
             login, is_bot = who(review)
@@ -435,13 +478,13 @@ class Watcher:
                 continue
             if review["state"] in ("APPROVED", "CHANGES_REQUESTED") or review["body"].strip():
                 state = review["state"].lower().replace("_", " ")
-                tag = "" if login in ADMINS else " [untrusted]"
+                tag = "" if trusted(login) else " [untrusted]"
                 self.emit(f"c:{review['id']}", f"review from {login}{tag} ({state}): {snippet(review['body'])} {review['url']}")
         unresolved: list[str] = []
         for thread in threads:
             nodes = thread["comments"]["nodes"]
             # An outsider's open thread must not hold up a merge.
-            if not thread["isResolved"] and nodes and (who(nodes[0])[0] in ADMINS or bot_name(who(nodes[0])[0]) in GATING_BOTS):
+            if not thread["isResolved"] and nodes and (trusted(who(nodes[0])[0]) or bot_name(who(nodes[0])[0]) in GATING_BOTS):
                 unresolved.append(nodes[0]["url"])
             where = f"{thread['path']}:{thread['line']}" if thread["line"] else thread["path"]
             for index, comment in enumerate(nodes):
@@ -449,7 +492,7 @@ class Watcher:
                 if login in mine:
                     continue
                 kind = "new thread" if index == 0 else "thread reply"
-                tag = "" if login in ADMINS else " [untrusted]"
+                tag = "" if trusted(login) else " [untrusted]"
                 self.emit(f"c:{comment['id']}", f"{kind} from {login}{tag} on {where}: {snippet(comment['body'])} {comment['url']}")
 
         # Review bots on the current head. A bot with checks is done when they
