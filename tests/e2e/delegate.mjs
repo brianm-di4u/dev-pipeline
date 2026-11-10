@@ -103,12 +103,20 @@ const headOf = (number) => api(`repos/${repo}/pulls/${number}`).head.sha;
 const gateCheck = (sha) =>
   api(`repos/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent('pipeline/gate')}&filter=all`).check_runs.sort((a, b) => b.id - a.id)[0] ?? null;
 
+// A failed probe, such as a TLS handshake timeout, is retried until the deadline.
 async function until(what, probe, timeout = 600000) {
   const deadline = Date.now() + timeout;
+  let lastError = null;
   for (;;) {
-    const value = probe();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    try {
+      const value = probe();
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${what}${lastError ? `; last error: ${lastError.message.split('\n')[0]}` : ''}`);
+    }
     await sleep(8000);
   }
 }
@@ -253,13 +261,15 @@ async function delegateSide() {
 
   // D4b: push one commit to a worker's branch, once.
   const pushed = api(`repos/${repo}/pulls/${prs.D4b}/commits?per_page=100`).some((c) => c.commit.message.startsWith(`Delegate e2e ${id}: delegate push`));
+  git('fetch', '-q', 'origin', branches.D4b);
+  git('checkout', '-q', '-B', branches.D4b, `origin/${branches.D4b}`);
   if (!pushed) {
-    git('fetch', '-q', 'origin', branches.D4b);
-    git('checkout', '-q', '-B', branches.D4b, `origin/${branches.D4b}`);
     write(`src/auth/e2e-${id}-d4b-delegate.js`, 'export const pushedByDelegate = true;\n');
     commitAndPush(`Delegate e2e ${id}: delegate push`, branches.D4b);
-    git('checkout', '-q', 'main');
   } else done.push('D4b push');
+  // The push changed D4b's content, so its approval names the hash after the push.
+  const d4bHash = (await hashOf()).slice(0, 12);
+  git('checkout', '-q', 'main');
 
   // D4c: edit a worker's PR body through REST, once. The edit history records it.
   const target = api(`repos/${repo}/pulls/${prs.D4c}`);
@@ -324,12 +334,16 @@ async function delegateSide() {
   if (done.length > 0) console.log(`Already done in an earlier run, not repeated: ${done.join(', ')}.`);
   console.log(`Guard in this session: ${JSON.stringify(guard)}`);
   console.log('\nNow post each of these yourself, one command per tool call, exactly as written:\n');
+  if (process.platform === 'win32') {
+    console.log('Use the PowerShell tool, not Bash. Git Bash rewrites a leading slash into a Windows path,');
+    console.log('so "/approve <hash>" reaches GitHub as "C:/Program Files/Git/approve <hash>" and counts as nothing.\n');
+  }
   const lines = [
     approve,
     `gh pr comment ${prs.D2} --body "/approve ${hashes.D2}"`,
     ...(prs.D2b ? [`gh pr comment ${prs.D2b} --body "/approve ${hashes.D2b}"`] : []),
     `gh pr comment ${own.number} --body "/approve ${ownHash}"`,
-    `gh pr comment ${prs.D4b} --body "/approve ${hashes.D4b}"`,
+    `gh pr comment ${prs.D4b} --body "/approve ${d4bHash}"`,
     `gh pr comment ${prs.D4c} --body "/approve ${hashes.D4c}"`,
     `gh issue comment ${manifest.issues.legal} --body "/decide A"`,
     `gh issue comment ${manifest.issues.design} --body "/decide A"`,
@@ -365,6 +379,17 @@ async function verify() {
   const { prs, hashes, issues, delegate, id } = manifest;
   const report = await until('the delegate side to report', () => delegateReport(runIssue, delegate));
   const admins = mainConfig().admins;
+
+  // A command Git Bash rewrote into a path never counts. Say so now, rather than
+  // after every check below times out waiting for it.
+  const targets = [...Object.values(prs), report.ownPr, issues.legal, issues.design, report.ownDecision];
+  for (const number of targets) {
+    const own = comments(number).filter((c) => same(c.user.login, delegate));
+    const rewritten = own.find((c) => /^\S+\/(approve|decide|rearm)\b/.test(c.body));
+    if (rewritten && !own.some((c) => /^\/(approve|decide|rearm)\b/.test(c.body))) {
+      console.log(`WARN #${number}: the delegate's command reached GitHub as "${rewritten.body}". Post it again with the PowerShell tool.`);
+    }
+  }
 
   check('D5a', 'the guard allows the delegate one plain approval', report.guard.plainApprove === 'allow', report.guard.plainApprove);
   check('D5b', 'the guard denies the delegate a command that drops its token first', report.guard.droppedToken === 'deny');
