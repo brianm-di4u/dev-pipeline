@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { evaluateGate as evaluateBefore } from './fixtures/before-freshness/gate-core.mjs';
 import { fakeGitHub } from './fixtures/fake-github.mjs';
-import { freshnessCheck } from '../bin/pipeline.mjs';
+import { freshnessCheck, pushBranches, strictFrom } from '../bin/pipeline.mjs';
 import { buildInbox } from '../template/.pipeline/garden.mjs';
-import { freshAt, mainMoved, settle } from '../template/.pipeline/gate.mjs';
+import { evaluatingBody, freshAt, mainMoved, publishFresh, publishedSince } from '../template/.pipeline/gate.mjs';
 import { parseConfig } from '../template/.pipeline/lib/config.mjs';
 import { gateRunProblems } from '../template/.pipeline/lib/delegates.mjs';
 import { buildDigest, freshnessSummary, renderDigest } from '../template/.pipeline/lib/digest.mjs';
@@ -98,6 +98,21 @@ test('any floor change stales every PR, and config can add to the floor but not 
   // The built-in floor is a constant, and the config's list only adds to it.
   assert.ok(FRESHNESS_FLOOR.includes('.github/**'));
   assert.equal(freshnessOf(overlap({ floor: [] }), ['.github/workflows/ci.yml'], ['src/a.js']).stale, true);
+});
+
+test('a floor or group entry written as a directory covers everything under it', () => {
+  for (const entry of ['schema/', 'schema', 'schema//']) {
+    assert.equal(freshnessOf(overlap({ floor: [entry] }), ['schema/a.sql'], ['src/a.js']).stale, true, entry);
+    assert.equal(freshnessOf(overlap({ floor: [entry] }), ['schema'], ['src/a.js']).stale, true, entry);
+    assert.equal(freshnessOf(overlap({ floor: [entry] }), ['schemas/a.sql'], ['src/a.js']).stale, false, entry);
+  }
+  for (const entry of ['src/auth/', 'src/auth']) {
+    assert.equal(freshnessOf(overlap({ groups: { auth: [entry] } }), ['src/auth/a.js'], ['src/auth/deep/b.js']).stale, true, entry);
+  }
+  // A glob is taken as written.
+  assert.equal(freshnessOf(overlap({ floor: ['schema/*.sql'] }), ['schema/deep/a.sql'], ['src/a.js']).stale, false);
+  // An entry that is only slashes names nothing, so the setting fails closed.
+  assert.equal(cleanFreshness({ mode: 'overlap', floor: ['/'] }).mode, 'current');
 });
 
 test('a group is one unit: a change anywhere in it stales a PR touching any of it', () => {
@@ -269,53 +284,144 @@ test('on real git: policy comes from main, so a branch cannot turn freshness off
 // Publishing, and re-evaluating when main moves.
 // ---------------------------------------------------------------------------
 
-const refClient = (shas) => {
-  const calls = [];
-  return { calls, get: async (path) => (calls.push(path), { object: { sha: shas.length > 1 ? shas.shift() : shas[0] } }) };
+// Answers main's ref from a list, and records every check it's asked to publish.
+const pubClient = (shas) => {
+  const reads = [];
+  const published = [];
+  return {
+    reads,
+    published,
+    get: async (path) => (reads.push(path), { object: { sha: shas.length > 1 ? shas.shift() : shas[0] } }),
+    post: async (path, body) => (published.push(body), {}),
+  };
 };
 const pass = { tier: 2, conclusion: 'success', status: 'completed', title: 'T2: ready to merge', summary: 's' };
-const freshInput = { freshness: { stale: false }, baseSha: 'm1', defaultBranch: 'main' };
+const staleResult = { ...pass, conclusion: 'failure', title: 'T2: update the branch' };
+const pubInput = (baseSha = 'm1') => ({ pr: { head: 'h7', url: 'u7' }, config: base, defaultBranch: 'main', freshness: { stale: false }, baseSha });
 
 test('without freshness, a publish reads nothing more', async () => {
-  const client = refClient(['m2']);
-  const out = await settle(client, 'o/r', 7, '.', { defaultBranch: 'main' }, pass, () => assert.fail('no re-evaluation'));
+  const client = pubClient(['m2']);
+  const out = await publishFresh(client, 'o/r', 7, '.', { ...pubInput(), freshness: undefined }, pass, {}, () => assert.fail('no re-evaluation'));
   assert.equal(out.result, pass);
-  assert.deepEqual(client.calls, []);
+  assert.deepEqual(client.reads, []);
+  assert.deepEqual(client.published.map((b) => b.conclusion), ['success']);
 });
 
-test('a gate run publishes as is when main has not moved, and evaluates again when it has', async () => {
-  assert.equal((await settle(refClient(['m1']), 'o/r', 7, '.', freshInput, pass, () => assert.fail('no re-evaluation'))).result, pass);
-  const stale = { ...pass, conclusion: 'failure', title: 'T2: update the branch' };
-  let again = 0;
-  const out = await settle(refClient(['m2', 'm2']), 'o/r', 7, '.', freshInput, pass, async () => ((again += 1), { input: { ...freshInput, baseSha: 'm2' }, result: stale }));
-  assert.equal(again, 1);
-  assert.equal(out.result, stale);
+test('a pass goes out only for the main that is current, checked before and after publishing', async () => {
+  const still = pubClient(['m1']);
+  await publishFresh(still, 'o/r', 7, '.', pubInput(), pass, {}, () => assert.fail('no re-evaluation'));
+  assert.equal(still.published.length, 1);
+  assert.equal(still.reads.length, 2);
+  // Main moved before publishing: the pass never goes out.
+  const before = pubClient(['m2']);
+  await publishFresh(before, 'o/r', 7, '.', pubInput(), pass, {}, async () => ({ input: pubInput('m2'), result: staleResult }));
+  assert.deepEqual(before.published.map((b) => b.conclusion), ['failure']);
+  // Main moved just after: the run evaluates again and publishes over it, so the last writer is current.
+  const after = pubClient(['m1', 'm2']);
+  await publishFresh(after, 'o/r', 7, '.', pubInput(), pass, {}, async () => ({ input: pubInput('m2'), result: staleResult }));
+  assert.deepEqual(after.published.map((b) => b.conclusion), ['success', 'failure']);
+  // Anything but a pass publishes at once.
+  const waiting = pubClient(['m9']);
+  await publishFresh(waiting, 'o/r', 7, '.', pubInput(), { ...pass, conclusion: 'action_required' }, {}, () => assert.fail('no re-evaluation'));
+  assert.deepEqual(waiting.reads, []);
 });
 
-test('if main keeps moving, a pass is held back, and anything else publishes', async () => {
-  const moving = () => refClient(['m2', 'm3', 'm4', 'm5']);
-  const again = (result) => async () => ({ input: { ...freshInput, baseSha: 'old' }, result });
-  const held = await settle(moving(), 'o/r', 7, '.', freshInput, pass, again(pass));
-  assert.equal(held.result.status, 'in_progress');
-  assert.equal(held.result.conclusion, null);
-  assert.match(held.result.title, /waiting for main to settle/);
-  const waiting = { ...pass, conclusion: 'action_required' };
-  assert.equal((await settle(moving(), 'o/r', 7, '.', freshInput, waiting, again(waiting))).result, waiting);
+test('if main keeps moving, the newest evaluation goes out, and nothing is left in progress', async () => {
+  const moving = pubClient(['m2', 'm3', 'm4', 'm5', 'm6']);
+  let n = 0;
+  const out = await publishFresh(moving, 'o/r', 7, '.', pubInput(), pass, {}, async () => ({ input: pubInput(`old${(n += 1)}`), result: pass }));
+  assert.equal(out.result.conclusion, 'success');
+  assert.equal(moving.published.length, 1);
+  assert.ok(moving.published.every((body) => body.status === 'completed'));
 });
 
-test('a push to main re-evaluates each open PR whose gate could let it merge, and only with freshness', async () => {
-  const gate = (conclusion) => [{ id: 1, name: 'pipeline/gate', app: { slug: 'github-actions' }, status: 'completed', conclusion }];
-  const pr = (number, extra = {}) => ({ number, state: 'open', draft: false, head: { sha: `h${number}` }, base: { ref: 'main', repo: { default_branch: 'main' } }, ...extra });
+test('a new head is marked in progress before anything is evaluated', () => {
+  const pr = { head: { sha: 'h7' }, html_url: 'u7' };
+  const body = evaluatingBody(pr, base, '42');
+  assert.equal(body.status, 'in_progress');
+  assert.equal(body.head_sha, 'h7');
+  assert.equal('conclusion' in body, false);
+  assert.equal('external_id' in body, false);
+  assert.equal(evaluatingBody(pr, delegated, '42').external_id, '42');
+});
+
+test('each check says which main it was evaluated against', () => {
+  const freshness = { ...freshnessOf(overlap(), [], ['src/a.js']), base: 'f'.repeat(40) };
+  for (const overrides of [{}, { verify: 'failure' }, { changes: [change('src/auth/a.js')] }]) {
+    assert.match(evaluateGate(gateInput({ ...overrides, freshness })).summary, /Evaluated against `ffffffffffff` on the default branch\.\n<!-- pipeline:base f{40} -->$/);
+  }
+});
+
+const gateRun = (conclusion, summary = '', at = '2026-11-09T10:00:00Z') => [
+  { id: 1, name: 'pipeline/gate', app: { slug: 'github-actions' }, status: 'completed', conclusion, started_at: at, completed_at: at, output: { summary } },
+];
+const openPr = (number, extra = {}) => ({ number, state: 'open', draft: false, head: { sha: `h${number}` }, base: { ref: 'main', repo: { default_branch: 'main' } }, ...extra });
+
+test('when main moves, only PRs whose freshness verdict changes are evaluated in full', async () => {
   const client = fakeGitHub({
-    pulls: [pr(1), pr(2), pr(3), pr(4, { draft: true }), pr(5, { base: { ref: 'release', repo: { default_branch: 'main' } } }), pr(6)],
-    checkRuns: { h1: gate('success'), h2: gate('action_required'), h3: gate('failure'), h4: gate('success'), h5: gate('success'), h6: [] },
+    pulls: [openPr(1), openPr(2), openPr(3), openPr(4), openPr(5, { draft: true }), openPr(6, { base: { ref: 'release', repo: { default_branch: 'main' } } }), openPr(7)],
+    checkRuns: {
+      h1: gateRun('success'),
+      h2: gateRun('action_required'),
+      h3: gateRun('failure', `held\n${STALE_MARKER}`),
+      h4: gateRun('failure', `held\n${STALE_MARKER}`),
+      h5: gateRun('success'),
+      h6: gateRun('success'),
+      h7: gateRun('failure', 'blocked for something else'),
+    },
   });
-  const seen = [];
-  const republish = async (c, repo, numbers) => (seen.push(...numbers), numbers.map((number) => ({ number, conclusion: 'success' })));
-  assert.deepEqual(await mainMoved(client, 'o/r', base, '.', republish), { skipped: 'freshness is not configured' });
-  assert.deepEqual(seen, []);
-  await mainMoved(client, 'o/r', { ...base, freshness: overlap() }, '.', republish);
-  assert.deepEqual(seen, [1, 2, 6]);
+  // 1 is newly stale; 2 is still fresh; 3 was held but main reverted the overlap; 4 is still held; 7 fails for another reason and is now stale too.
+  const stale = { 1: true, 2: false, 3: false, 4: true, 7: true };
+  const calls = [];
+  const options = { republish: async (c, repo, numbers, cwd, opts) => (calls.push({ numbers, opts }), []), freshnessOfPr: (number) => ({ stale: stale[number] }) };
+  assert.deepEqual(await mainMoved(client, 'o/r', base, '.', options), { skipped: 'freshness is not configured' });
+  assert.deepEqual(calls, []);
+  await mainMoved(client, 'o/r', { ...base, freshness: overlap() }, '.', { ...options, since: '2026-11-09T11:00:00Z' });
+  assert.deepEqual(calls, [{ numbers: [1, 3, 7], opts: { since: '2026-11-09T11:00:00Z' } }]);
+});
+
+test('on real git: the push run reads each PR\'s freshness locally, from the remote\'s refs', async () => {
+  const repo = repoWith({ ...base, freshness: { mode: 'overlap' } });
+  const remote = mkdtempSync(join(tmpdir(), 'freshness-remote-'));
+  try {
+    execFileSync('git', ['init', '-q', '--bare', remote]);
+    repo.git('remote', 'add', 'origin', remote);
+    repo.git('checkout', '-q', '-b', 'one');
+    repo.commit({ 'src/a.js': '2\n' }, 'touches a');
+    repo.git('push', '-q', 'origin', 'HEAD:refs/pull/1/head');
+    repo.git('checkout', '-q', '-b', 'two', 'main');
+    repo.commit({ 'src/c.js': '1\n' }, 'touches c');
+    repo.git('push', '-q', 'origin', 'HEAD:refs/pull/2/head');
+    repo.git('checkout', '-q', 'main');
+    repo.commit({ 'src/a.js': '3\n' }, 'main touches a');
+    repo.git('push', '-q', 'origin', 'main');
+    const client = fakeGitHub({ pulls: [openPr(1), openPr(2)], checkRuns: { h1: gateRun('success'), h2: gateRun('success') } });
+    const seen = [];
+    await mainMoved(client, 'o/r', { ...base, freshness: overlap() }, repo.dir, { republish: async (c, r, numbers) => (seen.push(...numbers), []) });
+    assert.deepEqual(seen, [1]);
+  } finally {
+    repo.cleanup();
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("a PR whose freshness can't be read locally is evaluated in full", async () => {
+  const client = fakeGitHub({ pulls: [openPr(1), openPr(2)], checkRuns: { h1: gateRun('success'), h2: gateRun('failure', STALE_MARKER) } });
+  const calls = [];
+  await mainMoved(client, 'o/r', { ...base, freshness: overlap() }, '.', {
+    republish: async (c, repo, numbers) => (calls.push(...numbers), []),
+    freshnessOfPr: () => {
+      throw new Error('no such ref');
+    },
+  });
+  assert.deepEqual(calls, [1, 2]);
+});
+
+test('a re-evaluation leaves alone a gate that another run published after it started', () => {
+  const [check] = gateRun('failure', '', '2026-11-09T11:00:05Z');
+  assert.equal(publishedSince(check, '2026-11-09T11:00:00Z'), true);
+  assert.equal(publishedSince(check, '2026-11-09T11:00:10Z'), false);
+  assert.equal(publishedSince(null, '2026-11-09T11:00:00Z'), false);
 });
 
 test("gate.yml's push run may re-publish on the default branch, and nowhere else", () => {
@@ -347,9 +453,9 @@ test("the inbox doesn't list a stale branch as a call to make", async () => {
 const prWait = fileURLToPath(new URL('../template/.claude/skills/babysit-pr/scripts/pr-wait', import.meta.url));
 const python = ['python3', 'python'].find((cmd) => spawnSync(cmd, ['--version']).status === 0);
 
-test('pr-wait reads a stale gate as "update the branch"', { skip: !python && 'python not installed' }, () => {
-  const run = (summary, slug = 'github-actions') =>
-    JSON.stringify({ check_runs: [{ id: 1, name: 'pipeline/gate', app: { slug: 'github-actions' }, output: { summary: 'older' } }, { id: 2, name: 'pipeline/gate', app: { slug }, output: { summary } }] });
+test('pr-wait reads a stale gate as "update the branch", and says so when it is blocked for more', { skip: !python && 'python not installed' }, () => {
+  const run = (summary, slug = 'github-actions', title = 'T2: update the branch') =>
+    JSON.stringify({ check_runs: [{ id: 1, name: 'pipeline/gate', app: { slug: 'github-actions' }, output: { summary: 'older' } }, { id: 2, name: 'pipeline/gate', app: { slug }, output: { title, summary } }] });
   const code = [
     'import importlib.machinery, importlib.util, json, subprocess, sys',
     `loader = importlib.machinery.SourceFileLoader("prwait", ${JSON.stringify(prWait)})`,
@@ -363,11 +469,11 @@ test('pr-wait reads a stale gate as "update the branch"', { skip: !python && 'py
     '    out.append(w.gate_stale("abc"))',
     'print(json.dumps(out))',
   ].join('\n');
-  const answers = [run(`blocked\n${STALE_MARKER}`), run('T2: blocked'), run(STALE_MARKER, 'someone-else'), 'not json'];
+  const answers = [run(`held\n${STALE_MARKER}`), run(`held\n${STALE_MARKER}`, 'github-actions', 'T2: blocked'), run('T2: blocked', 'github-actions', 'T2: blocked'), run(STALE_MARKER, 'someone-else'), 'not json'];
   const result = spawnSync(python, ['-c', code, JSON.stringify(answers)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  // Only the latest gate check from GitHub Actions counts.
-  assert.deepEqual(JSON.parse(result.stdout), [true, false, false, false]);
+  // Only the latest gate check from GitHub Actions counts. Blocked for more than the update, it says both.
+  assert.deepEqual(JSON.parse(result.stdout), ['only', 'also', '', '', '']);
 });
 
 // ---------------------------------------------------------------------------
@@ -381,11 +487,29 @@ test("doctor reports when freshness and GitHub's up-to-date rule don't fit toget
   assert.equal(freshnessCheck(null, true), null);
   assert.match(freshnessCheck(base, false).detail, /^UNGUARDED/);
   assert.equal(freshnessCheck(base, false).level, 'warn');
-  assert.match(freshnessCheck(on, true, true).detail, /no effect yet.*never an agent/);
-  assert.equal(freshnessCheck(on, false, true).level, 'ok');
-  assert.match(freshnessCheck(on, null, true).detail, /could not be read/);
-  assert.match(freshnessCheck(on, false, false).detail, /gate\.yml does not run on a push/);
-  assert.match(freshnessCheck({ ...base, freshness: { mode: 'loose' } }, false, true).detail, /unknown mode/);
+  assert.match(freshnessCheck(on, true, ['main']).detail, /no effect yet.*never an agent/);
+  assert.equal(freshnessCheck(on, false, ['main']).level, 'ok');
+  assert.match(freshnessCheck(on, null, ['main']).detail, /could not be read/);
+  assert.match(freshnessCheck(on, false, null).detail, /gate\.yml does not run on a push to main/);
+  // A default branch that isn't main needs gate.yml's push branches to name it.
+  assert.match(freshnessCheck(on, false, ['main'], 'trunk').detail, /does not run on a push to trunk/);
+  assert.equal(freshnessCheck(on, false, ['main', 'trunk'], 'trunk').level, 'ok');
+  assert.match(freshnessCheck({ ...base, freshness: { mode: 'loose' } }, false, ['main']).detail, /unknown mode/);
+});
+
+test("doctor reads gate.yml's push branches, and the up-to-date rule in a ruleset-only repo", () => {
+  assert.deepEqual(pushBranches("on:\n  push:\n    branches: [main, 'trunk']\n"), ['main', 'trunk']);
+  assert.equal(pushBranches('on:\n  pull_request_target:\n'), null);
+  assert.equal(strictFrom('true', 'false'), true);
+  assert.equal(strictFrom('false', 'true'), true);
+  assert.equal(strictFrom('false', 'false'), false);
+  // No branch protection at all, as in a ruleset-only repo: the rulesets decide.
+  const none = '{"message":"Branch not protected","status":"404"}gh: Branch not protected (HTTP 404)';
+  assert.equal(strictFrom(none, 'false'), false);
+  assert.equal(strictFrom(none, 'true'), true);
+  // Anything else unreadable stays unknown.
+  assert.equal(strictFrom('gh: Resource not accessible by integration (HTTP 403)', 'false'), null);
+  assert.equal(strictFrom(none, null), null);
 });
 
 test('the digest counts merges made while behind, and the reverts and red mains after them', () => {
@@ -403,7 +527,7 @@ test('the digest counts merges made while behind, and the reverts and red mains 
   assert.match(text, /## Merging while behind main/);
   assert.match(text, /Merged while behind main: 2 of 3 \(#1, #2\)/);
   assert.match(text, /Reverted afterwards: 1 \(#1\)/);
-  assert.match(text, /Main went red at one: 1 \(#40\)/);
+  assert.match(text, /Main went red at one: at least 1 \(#40\)\. A red main reported on a later merge's run/);
   assert.match(text, /Not checked: 1/);
   assert.doesNotMatch(renderDigest({ since: '2026-11-01T00:00:00Z', summary: summaryShape(), decisions: [], state: { breaker: [], mainRed: [], audit: [] } }), /behind main/);
 });

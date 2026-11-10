@@ -201,7 +201,7 @@ function delegateLines(delegate) {
   return lines;
 }
 
-function render({ tier, reasons, shortHash }, lines) {
+function render({ tier, reasons, shortHash, freshness }, lines) {
   return [
     `**Tier:** T${tier}`,
     `**Change:** \`${shortHash}\``,
@@ -210,5 +210,7 @@ function render({ tier, reasons, shortHash }, lines) {
     ...reasons.map((reason) => `- ${reason}`),
     '',
     ...lines,
+    // With freshness on, which commit of the default branch this was evaluated against.
+    ...(freshness?.base ? ['', `Evaluated against \`${freshness.base.slice(0, 12)}\` on the default branch.`, `<!-- pipeline:base ${freshness.base} -->`] : []),
   ].join('\n');
 }

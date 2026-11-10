@@ -413,19 +413,22 @@ class Watcher:
             return []
         return sorted(self.pr_files[head].intersection(moved))
 
-    def gate_stale(self, head: str) -> bool:
-        """Whether the gate holds this head only until the branch is updated."""
+    def gate_stale(self, head: str) -> str:
+        """Whether the gate holds this head for an update from the base: "only" when
+        that's all, "also" when it's blocked for something else too, or ""."""
         try:
             proc = gh(["api", f"repos/{self.repo}/commits/{head}/check-runs?check_name=pipeline%2Fgate&filter=latest&per_page=100"])
             runs = json.loads(proc.stdout).get("check_runs", [])
         except (GhError, ValueError, AttributeError) as error:
             log(f"could not read the gate check: {error}")
-            return False
+            return ""
         ours = [r for r in runs if r.get("name") == GATE_CHECK and (r.get("app") or {}).get("slug") == "github-actions"]
         if not ours:
-            return False
-        latest = max(ours, key=lambda r: r.get("id", 0))
-        return STALE_MARKER in ((latest.get("output") or {}).get("summary") or "")
+            return ""
+        output = max(ours, key=lambda r: r.get("id", 0)).get("output") or {}
+        if STALE_MARKER not in (output.get("summary") or ""):
+            return ""
+        return "only" if (output.get("title") or "").endswith("update the branch") else "also"
 
     def behind(self, base: str, base_oid: str | None, head: str) -> str:
         """How far the head is behind its base, for the green and ready lines."""
@@ -470,14 +473,18 @@ class Watcher:
         for name in sorted(gate):
             if bucket(name) in FAILED:
                 link = checks[name]["link"]
-                if name == GATE_CHECK and self.gate_stale(head):
-                    fail_lines.append(
+                lines = []
+                stale = self.gate_stale(head) if name == GATE_CHECK else ""
+                if stale:
+                    lines.append(
                         f"{name} wants the branch updated: {base} changed files this PR depends on. "
                         f"Merge or rebase {base}, push, and wait again {link}"
                     )
-                else:
-                    fail_lines.append(f"{label} failed: {name} {link}")
-                self.emit(f"fail:{head}:{name}:{link}", fail_lines[-1])
+                if stale != "only":
+                    # Blocked for something besides the update too, or failed outright.
+                    lines.append(f"{label} failed: {name} {link}")
+                fail_lines.extend(lines)
+                self.emit(f"fail:{head}:{name}:{link}", " | ".join(lines))
         watched = {name: c for name, c in checks.items() if bot_name(name) not in ADVISORY_BOTS}
         gate_done = bool(gate) and all(bucket(n) != "pending" for n in gate)
         all_done = gate_done and all(c["bucket"] != "pending" for c in watched.values())

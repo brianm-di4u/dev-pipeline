@@ -38,7 +38,18 @@ export const STALE_TITLE = 'update the branch';
 const MODES = ['overlap'];
 const LISTED = 20;
 
-const isGlobList = (value) => Array.isArray(value) && value.every((glob) => typeof glob === 'string' && glob.trim() !== '');
+const isGlobList = (value) =>
+  Array.isArray(value) && value.every((glob) => typeof glob === 'string' && glob.trim().replace(/\/+$/, '') !== '');
+
+// An entry written as a directory, `schema/` or `schema` with no glob characters,
+// means that path and everything under it. Anything else is a glob as written.
+export function expandEntries(entries) {
+  return entries.flatMap((entry) => {
+    if (!entry.endsWith('/') && /[*?]/.test(entry)) return [entry];
+    const bare = entry.replace(/\/+$/, '');
+    return [bare, `${bare}/**`];
+  });
+}
 
 // The setting as the gate uses it, or null when absent. Never throws. A present
 // but malformed setting fails closed: the gate then needs the branch to include
@@ -86,12 +97,13 @@ export function freshnessOf(setting, mainPaths, prPaths) {
     return result;
   }
 
-  const floor = mainPaths.filter((path) => matchesAny(path, [...FRESHNESS_FLOOR, ...setting.floor]));
+  const floor = mainPaths.filter((path) => matchesAny(path, [...FRESHNESS_FLOOR, ...expandEntries(setting.floor)]));
   if (floor.length > 0) result.reasons.push(`main changed ${list(floor)}, which every open PR must include`);
   if (both.length > 0) result.reasons.push(`main changed ${list(both)}, which this PR also changes`);
 
   const grouped = [];
-  for (const [name, globs] of Object.entries(setting.groups)) {
+  for (const [name, entries] of Object.entries(setting.groups)) {
+    const globs = expandEntries(entries);
     const onMain = mainPaths.filter((path) => matchesAny(path, globs));
     if (onMain.length > 0 && prPaths.some((path) => matchesAny(path, globs))) {
       grouped.push(...onMain);

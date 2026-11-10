@@ -97,7 +97,7 @@ By default GitHub requires every branch to be up to date with `main`, so each me
 "freshness": { "mode": "overlap" }
 ```
 
-The gate then lets a PR merge while behind `main`, unless `main` has since changed a file the PR changes, a file in a group the PR touches (`"groups": { "engine": ["crates/engine/**"] }`), or a floor path. Any change to a floor path holds every open PR until it updates: the pipeline's own files, `.github/`, and dependency manifests and lockfiles. `"floor": [...]` adds paths to the floor, and nothing can remove the built-in ones.
+The gate then lets a PR merge while behind `main`, unless `main` has since changed a file the PR changes, a file in a group the PR touches (`"groups": { "engine": ["crates/engine/**"] }`), or a floor path. Any change to a floor path holds every open PR until it updates: the pipeline's own files, `.github/`, and dependency manifests and lockfiles. `"floor": [...]` adds paths to the floor, and nothing can remove the built-in ones. An entry written as a directory, `schema/` or `schema`, covers everything under it.
 
 1. Merge the config change. It's T2, so it needs your approval.
 2. Then, and only then, turn off **Require branches to be up to date before merging** in the branch rule for `main`. You do this by hand. An agent never does: `.pipeline/AUTONOMY.md` forbids it, and the guard blocks the API calls that would. Running `pipeline protect` again turns the rule back on.

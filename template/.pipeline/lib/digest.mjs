@@ -322,7 +322,9 @@ function freshnessSection(f) {
     '',
     `- Merged while behind main: ${f.whileBehind.length} of ${f.checked}${refs(f.whileBehind)}`,
     `- Reverted afterwards: ${f.reverted.length}${refs(f.reverted)}`,
-    `- Main went red at one: ${f.redMain.length}${refs(f.redMain)}`,
+    // A lower bound: post-merge drops a queued run when another queues, so a merge's
+    // red can surface on a later commit, and no second red issue opens while one is.
+    `- Main went red at one: at least ${f.redMain.length}${refs(f.redMain)}. A red main reported on a later merge's run, or while main was already red, isn't counted`,
     ...(f.unknown ? [`- Not checked: ${f.unknown}, because GitHub couldn't be read`] : []),
   ];
 }

@@ -607,8 +607,8 @@ async function doctor({ flags }) {
     }
     if (!info.private) add(info.allow_auto_merge ? 'ok' : 'fail', 'Auto-merge', info.allow_auto_merge ? 'enabled' : 'run pipeline protect');
     const gateYml = join(cwd, '.github', 'workflows', 'gate.yml');
-    const runsOnPush = existsSync(gateYml) ? /^\s+push:/m.test(readFileSync(gateYml, 'utf8')) : null;
-    const fresh = freshnessCheck(config, readStrict(repo, info.default_branch), runsOnPush);
+    const branches = existsSync(gateYml) ? pushBranches(readFileSync(gateYml, 'utf8')) : null;
+    const fresh = freshnessCheck(config, readStrict(repo, info.default_branch), branches, info.default_branch);
     if (fresh) add(fresh.level, fresh.name, fresh.detail);
   } else {
     add('warn', 'GitHub', 'no remote repo found');
@@ -626,24 +626,37 @@ async function doctor({ flags }) {
 // Whether GitHub requires branches to be up to date before merging, from branch
 // protection or a ruleset: true, false, or null when it can't be read.
 function readStrict(repo, branch) {
-  const classic = tryRun('gh', ['api', `repos/${repo}/branches/${branch}/protection/required_status_checks`, '--jq', '.strict']);
+  const classic = spawnSync('gh', ['api', `repos/${repo}/branches/${branch}/protection/required_status_checks`, '--jq', '.strict'], { encoding: 'utf8' });
   const rules = tryRun('gh', [
     'api',
     `repos/${repo}/rules/branches/${branch}`,
     '--jq',
     '[.[] | select(.type == "required_status_checks") | .parameters.strict_required_status_checks_policy] | any',
   ]);
+  return strictFrom(classic.status === 0 ? classic.stdout.trim() : `${classic.stdout}${classic.stderr}`, rules);
+}
+
+// From branch protection's answer and the rulesets' answer. A 404 from branch
+// protection means none, as in a ruleset-only repo, so the rulesets decide.
+export function strictFrom(classic, rules) {
+  const none = /\(HTTP 404\)/.test(classic ?? '');
   if (classic === 'true' || rules === 'true') return true;
-  if (classic === 'false' && rules === 'false') return false;
+  if ((classic === 'false' || none) && rules === 'false') return false;
   return null;
+}
+
+// The branches gate.yml runs on for a push, or null if it doesn't run on one.
+export function pushBranches(workflow) {
+  const match = /^ {2}push:\s*\n {4}branches:\s*\[([^\]]*)\]/m.exec(workflow);
+  return match ? match[1].split(',').map((name) => name.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean) : null;
 }
 
 // Branch freshness and GitHub's "require branches to be up to date" rule work as a
 // pair. With freshness on, the rule makes it moot until the admin turns the rule
 // off. With the rule off and no freshness, nothing stops a merge on a stale base.
 // Null when there's nothing to say, which is the case without freshness and with
-// the rule on, as before.
-export function freshnessCheck(config, strict, runsOnPush = null) {
+// the rule on, as before. `branches` is what gate.yml runs on for a push.
+export function freshnessCheck(config, strict, branches = undefined, defaultBranch = 'main') {
   const name = 'Branch freshness';
   if (config?.freshness === undefined) {
     if (strict === false) {
@@ -656,8 +669,12 @@ export function freshnessCheck(config, strict, runsOnPush = null) {
     problem = message;
   });
   if (setting.mode !== 'overlap') return { level: 'warn', name, detail: `${problem} Fix it, or remove it.` };
-  if (runsOnPush === false) {
-    return { level: 'warn', name, detail: 'gate.yml does not run on a push to main, so a merge that stales an open PR leaves its gate green until its next event. Update gate.yml.' };
+  if (branches !== undefined && !(branches ?? []).includes(defaultBranch)) {
+    return {
+      level: 'warn',
+      name,
+      detail: `gate.yml does not run on a push to ${defaultBranch}, so a merge that stales an open PR leaves its gate green until the hourly re-check. Add ${defaultBranch} to its push branches.`,
+    };
   }
   if (strict === true) {
     return { level: 'warn', name, detail: 'no effect yet: GitHub still requires branches to be up to date. The admin turns that rule off by hand, never an agent.' };
