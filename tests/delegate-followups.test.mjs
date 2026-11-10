@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { checkCommand, grantCovers, targetRepo } from '../template/.claude/hooks/guard.mjs';
+import { aimedOnlyAt, checkCommand, grantCovers, targetRepos } from '../template/.claude/hooks/guard.mjs';
 import { authority, cleanDelegates } from '../template/.pipeline/lib/authority.mjs';
 import { decisionProblems, findApproval, rearmProblems } from '../template/.pipeline/lib/contract.mjs';
 import { tokenCheck } from '../bin/pipeline.mjs';
@@ -36,32 +36,74 @@ test("the docs, the setup script and doctor name the delegate's three scopes", (
 // The guard: a grant covers only the working directory's own repo.
 // ---------------------------------------------------------------------------
 
-test('the target repo of a gh command', () => {
+test('every repo a gh command names', () => {
   const tokens = (command) => command.split(' ');
-  assert.equal(targetRepo(tokens('gh pr comment 5 --body x'), {}), null);
-  assert.equal(targetRepo(tokens('gh pr comment 5 --repo other/repo --body x'), {}), 'other/repo');
-  assert.equal(targetRepo(tokens('gh pr comment 5 -R other/repo'), {}), 'other/repo');
-  assert.equal(targetRepo(tokens('gh pr comment 5 --repo=other/repo'), {}), 'other/repo');
-  assert.equal(targetRepo(tokens('gh pr comment https://github.com/other/repo/pull/5 --body x'), {}), 'other/repo');
-  assert.equal(targetRepo(tokens('gh issue comment https://github.com/o/r/issues/9 --body x'), {}), 'o/r');
-  assert.equal(targetRepo(tokens('gh pr comment 5 --body x'), { GH_REPO: 'env/repo' }), 'env/repo');
+  const repos = (command, env = {}) => targetRepos(tokens(command), env);
+  assert.deepEqual(repos('gh pr comment 5 --body x'), []);
+  assert.deepEqual(repos('gh pr comment 5 --repo other/repo --body x'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment 5 -R other/repo'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment 5 --repo=other/repo'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment 5 --repo https://github.com/other/repo.git'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment 5 -R github.com/other/repo'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment https://github.com/other/repo/pull/5 --body x'), ['other/repo']);
+  assert.deepEqual(repos('gh issue comment https://github.com/o/r/issues/9 --body x'), ['o/r']);
+  assert.deepEqual(repos('gh pr comment 5 --body x', { GH_REPO: 'env/repo' }), ['env/repo']);
+  // The attached short forms gh accepts.
+  assert.deepEqual(repos('gh pr comment 5 -Rother/repo'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment 5 -R=other/repo'), ['other/repo']);
+  assert.deepEqual(repos('gh pr comment 5 -eR other/repo'), ['other/repo']);
+  // -b takes the rest of its cluster as the body, so this R isn't a repo.
+  assert.deepEqual(repos('gh pr comment 5 -bRx'), []);
+  // All of them, not the first: gh uses the last flag, and a URL can differ from it.
+  assert.deepEqual(repos('gh pr comment 5 --repo o/r --repo other/repo'), ['o/r', 'other/repo']);
+  assert.deepEqual(repos('gh pr comment https://github.com/other/repo/pull/5 --repo o/r'), ['other/repo', 'o/r']);
+  assert.deepEqual(repos('gh pr comment 5 --repo o/r', { GH_REPO: 'other/repo' }), ['o/r', 'other/repo']);
+  // A flag with no value names something, so it can't pass as the working repo.
+  assert.deepEqual(repos('gh pr comment 5 --repo'), ['(missing)']);
 });
 
-test('a delegate command aimed at another repo is denied; one at the working repo goes on to the grant', () => {
-  const seen = [];
+test('a repo check passes only when every named repo is the working repo', () => {
+  assert.equal(aimedOnlyAt([], 'o/r'), true);
+  assert.equal(aimedOnlyAt(['O/R', 'o/r'], 'o/r'), true);
+  assert.equal(aimedOnlyAt(['o/r', 'other/repo'], 'o/r'), false);
+  assert.equal(aimedOnlyAt(['other/repo', 'o/r'], 'o/r'), false);
+  assert.equal(aimedOnlyAt(['o/r'], undefined), false);
+});
+
+test('a delegate command aimed at another repo is denied; one aimed only at the working repo goes on to the grant', () => {
   const ctx = {
     currentBranch: () => 'feature/x',
     isOwnPr: () => true,
     localDelegates: () => true,
     isDelegateSession: () => true,
-    // Stands in for the lookup: the working directory is o/r.
-    delegateMayPost: (words, cwd, target) => (seen.push(target), !target || target.toLowerCase() === 'o/r'),
+    // Stands in for the lookup: the working directory is o/r, and the grant covers the command.
+    delegateMayPost: (words, cwd, targets) => aimedOnlyAt(targets, 'o/r'),
   };
-  assert.equal(checkCommand('gh pr comment 5 --body "/approve abcdef012345"', ctx), null);
-  assert.equal(checkCommand('gh pr comment 5 --repo O/R --body "/approve abcdef012345"', ctx), null);
-  assert.match(checkCommand('gh pr comment 5 --repo other/repo --body "/approve abcdef012345"', ctx), /Only a human posts/);
-  assert.match(checkCommand('gh pr comment https://github.com/other/repo/pull/5 --body "/approve abcdef012345"', ctx), /Only a human posts/);
-  assert.deepEqual(seen, [process.env.GH_REPO || null, 'O/R', 'other/repo', 'other/repo']);
+  const approve = '--body "/approve abcdef012345"';
+  const saved = process.env.GH_REPO;
+  delete process.env.GH_REPO;
+  try {
+    for (const command of [`gh pr comment 5 ${approve}`, `gh pr comment 5 --repo O/R ${approve}`, `gh pr comment 5 -Ro/r ${approve}`, `gh pr comment https://github.com/o/r/pull/5 --repo o/r ${approve}`]) {
+      assert.equal(checkCommand(command, ctx), null, command);
+    }
+    for (const command of [
+      `gh pr comment 5 --repo other/repo ${approve}`,
+      `gh pr comment https://github.com/other/repo/pull/5 ${approve}`,
+      `gh pr comment 5 -Rother/repo ${approve}`,
+      `gh pr comment 5 -R=other/repo ${approve}`,
+      `gh pr comment 5 --repo o/r --repo other/repo ${approve}`,
+      `gh pr comment 5 --repo other/repo --repo o/r ${approve}`,
+      `gh pr comment https://github.com/other/repo/pull/5 --repo o/r ${approve}`,
+      `gh pr comment https://github.com/o/r/pull/5 -R other/repo ${approve}`,
+    ]) {
+      assert.match(checkCommand(command, ctx) ?? '', /Only a human posts/, command);
+    }
+    process.env.GH_REPO = 'other/repo';
+    assert.match(checkCommand(`gh pr comment 5 --repo o/r ${approve}`, ctx) ?? '', /Only a human posts/, 'GH_REPO names another repo');
+  } finally {
+    if (saved === undefined) delete process.env.GH_REPO;
+    else process.env.GH_REPO = saved;
+  }
 });
 
 // ---------------------------------------------------------------------------

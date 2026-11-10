@@ -38,18 +38,38 @@ const RELEASE_API = /(^|\/)(releases\b|actions\/workflows\/([^/\s]*release[^/\s]
 const PLAIN_COMMENT = /^gh(?:\.exe)?\s+(?:issue|pr)\s+comment\s/i;
 const SHELL_META = /[;&|`$<>()\r\n]/;
 
-// The repo a gh command names, from --repo or -R, or from an issue or PR URL, or
-// null when it means the working directory's own repo. GH_REPO in the
-// environment also counts.
-export function targetRepo(tokens, env = process.env) {
-  const flag = tokens.findIndex((token) => token === '--repo' || token === '-R');
-  if (flag !== -1 && tokens[flag + 1]) return tokens[flag + 1].replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/, '');
-  const inline = tokens.find((token) => /^--repo=/.test(token));
-  if (inline) return inline.slice('--repo='.length);
-  const url = tokens.map((token) => /github\.com\/([^/\s]+\/[^/\s]+)\/(?:pull|issues)\/\d+/i.exec(token)).find(Boolean);
-  if (url) return url[1];
-  return env.GH_REPO || null;
+// Every repo a gh comment command names: each --repo or -R, in any form gh
+// accepts, each issue or PR URL, and GH_REPO in the environment. None means the
+// working directory's own repo. All of them are returned, not the first, because
+// gh uses the last flag, and a URL can name a repo the flag doesn't.
+export function targetRepos(tokens, env = process.env) {
+  const repos = [];
+  const add = (value) => {
+    const repo = (value ?? '')
+      .replace(/["']/g, '')
+      .replace(/^https?:\/\//i, '')
+      .replace(/^github\.com\//i, '')
+      .replace(/\.git$/i, '')
+      .replace(/\/+$/, '');
+    // A flag with no value still names something, so it can't pass as the working repo.
+    repos.push(repo || '(missing)');
+  };
+  tokens.forEach((token, i) => {
+    if (token === '--repo') return add(tokens[i + 1]);
+    if (token.startsWith('--repo=')) return add(token.slice('--repo='.length));
+    // A one-letter cluster: -R, -Rowner/repo, -R=owner/repo, or -eR owner/repo.
+    // A letter before R that takes a value, -b or -F, takes the rest instead.
+    const short = /^-([A-Za-z]*?)R(.*)$/.exec(token);
+    if (short && !/[bF]/.test(short[1])) return add(short[2] ? short[2].replace(/^=/, '') : tokens[i + 1]);
+    for (const url of token.matchAll(/github\.com\/([^/\s]+\/[^/\s]+)\/(?:pull|issues)\/\d+/gi)) add(url[1]);
+  });
+  if (env.GH_REPO) add(env.GH_REPO);
+  return repos;
 }
+
+// Whether every repo a command names is `repo`. Naming none means the working repo.
+export const aimedOnlyAt = (targets, repo) =>
+  targets.every((target) => typeof target === 'string' && typeof repo === 'string' && target.toLowerCase() === repo.toLowerCase());
 
 export function plainComment(command) {
   const text = (command ?? '').trim();
@@ -179,7 +199,7 @@ function checkGh(tokens, segment, context) {
     const text = `${segment}\n${bodyFileText(tokens, context.cwd)}`;
     if (COMMAND_WORD.test(text)) {
       const words = [...new Set([...text.matchAll(COMMAND_WORDS)].map((match) => match[1]))];
-      if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd, targetRepo(tokens))) {
+      if (!plainComment(context.command) || !context.delegateMayPost(words, context.cwd, targetRepos(tokens))) {
         return 'Only a human posts /approve, /decide, or /rearm. Reword it, for example "the approve command".';
       }
       if (context.gitBash) return GIT_BASH_COMMAND;
@@ -308,12 +328,12 @@ function sessionConfig(cwd) {
 // timeout denies. A repo with no delegates in its config is never looked up, so
 // it denies at once, as it always has.
 // The grant comes from the working directory's repo, so it only covers commands
-// aimed at that repo: a command naming another repo is denied.
-function defaultDelegateMayPost(words, cwd, target = null) {
+// aimed at that repo: unless every repo the command names is that repo, it is denied.
+function defaultDelegateMayPost(words, cwd, targets = []) {
   if (!defaultLocalDelegates(cwd)) return false;
   try {
     const { login, repo, config } = sessionConfig(cwd);
-    if (target && !sameLogin(target, repo)) return false;
+    if (!aimedOnlyAt(targets, repo)) return false;
     return grantCovers(config, login, words);
   } catch {
     return false;
