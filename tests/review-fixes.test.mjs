@@ -20,7 +20,7 @@ import { delegatesLifted, delegatesPostMerge, issueEvent, postMerge, previousRea
 const config = { admins: ['owner'], breaker: { window: 20, maxFailures: 3 }, tiers: { t2Paths: ['.github/**'], t0Paths: [], t0Exclude: [] }, merge: { t0: 'auto', t1: 'auto', t2: 'human' } };
 const delegated = (grant = {}) => ({ ...config, delegates: [{ login: 'gardener', approve: true, rearm: true, decide: ['design'], ...grant }] });
 const at = (h, m = 0) => `2026-11-09T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00Z`;
-const say = (body, login, time = at(10)) => ({ id: Date.parse(time) / 1000, body, user: { login, type: 'User' }, created_at: time, updated_at: time });
+const say = (body, login, time = at(10)) => ({ id: Date.parse(time) / 1000, body, user: { login, type: 'User' }, author_association: 'COLLABORATOR', created_at: time, updated_at: time });
 const change = (path) => ({ path, oldMode: '100644', newMode: '100644', oldSha: 'a', newSha: 'b', status: 'M' });
 
 // ---------------------------------------------------------------------------

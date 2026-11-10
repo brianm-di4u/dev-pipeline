@@ -27,6 +27,8 @@ const say = (body, login, at = '2026-11-11T12:00:00Z', extra = {}) => ({
   id: Math.floor(Math.random() * 1e9),
   body,
   user: { login, type: 'User' },
+  // GitHub's own word that the commenter has access, which a delegate's command needs.
+  author_association: 'COLLABORATOR',
   created_at: at,
   updated_at: at,
   ...extra,

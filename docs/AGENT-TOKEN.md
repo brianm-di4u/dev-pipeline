@@ -107,6 +107,8 @@ The guard lets a session post `/approve`, `/decide`, or `/rearm` only when `gh a
 
 **`since` keeps earlier commands out.** A delegate's command counts only if it was posted at or after its entry's `since`, an ISO date and time such as `"2026-11-10T00:00:00Z"`. Without `since`, a command the account posted before it was configured, for example from a browser left signed in as the delegate, starts counting once the `delegates` key lands, if its PR is still open at the same change. Set `since` to the time you add the entry.
 
+**`id` ties the entry to one account.** A login can change hands, for example after an account is renamed or deleted, but a user id can't. Set `id` to the delegate account's numeric user id, from `gh api users/<login> --jq .id`. Then only that account's commands count, and the guard lets a delegate session post only when it is that account. Whether or not `id` is set, a delegate's command counts only when GitHub shows on the comment that its author has access to the repo, so the account must stay a collaborator.
+
 The token sits in plain text in that file, which any process running as your Windows user can read. The template's settings deny agent sessions a `Read` of `//**/.claude/settings.local.json`, which matches that file anywhere on the machine, including a sibling clone. Claude Code applies a `Read` deny to Grep, Glob, and the shell commands it recognizes, such as `cat`, on a best-effort basis, and the guard denies any shell command that names the file. Neither stops a script that reads it indirectly. Moving the delegate to its own Windows user is the stronger fix.
 
 ## What this doesn't do

@@ -108,7 +108,7 @@ export async function delegateInputs(client, repo, number, comments, { pr = null
 }
 
 const EDITS_QUERY =
-  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){userContentEdits(first:100){nodes{editedAt editor{login}}}}}}';
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){userContentEdits(first:100){nodes{editedAt editor{login ... on User{databaseId}}}}}}}';
 
 async function recordedTouches(client, repo, number, pr, config) {
   const auth = authority(config);
@@ -119,7 +119,7 @@ async function recordedTouches(client, repo, number, pr, config) {
     const activity = await client.list(`/repos/${repo}/activity?ref=${ref}&per_page=100`);
     for (const entry of activity) {
       const pushed = ['push', 'force_push'].includes(entry.activity_type);
-      if (pushed && Date.parse(entry.timestamp) > opened && auth.delegateOf(entry.actor?.login)) {
+      if (pushed && Date.parse(entry.timestamp) > opened && auth.delegateOfUser(entry.actor)) {
         touches.push({ kind: 'push', login: entry.actor.login, at: entry.timestamp });
       }
     }
@@ -129,7 +129,7 @@ async function recordedTouches(client, repo, number, pr, config) {
   const edits = response?.data?.repository?.pullRequest?.userContentEdits?.nodes;
   if (!Array.isArray(edits)) throw new Error(`Could not read the edit history of #${number}`);
   for (const change of edits) {
-    if (Date.parse(change.editedAt) > opened && auth.delegateOf(change.editor?.login)) {
+    if (Date.parse(change.editedAt) > opened && auth.delegateOfUser({ login: change.editor?.login, id: change.editor?.databaseId })) {
       touches.push({ kind: 'body', login: change.editor.login, at: change.editedAt });
     }
   }
@@ -141,7 +141,7 @@ async function recordedTouches(client, repo, number, pr, config) {
 export function touchOf(eventName, event, config) {
   if (eventName !== 'pull_request_target') return null;
   const sender = event.sender?.login;
-  if (!sender || event.sender?.type === 'Bot' || !authority(config).delegateOf(sender)) return null;
+  if (!sender || event.sender?.type === 'Bot' || !authority(config).delegateOfUser(event.sender)) return null;
   if (event.action === 'synchronize') return { kind: 'push', login: sender };
   if (event.action === 'edited' && event.changes?.body) return { kind: 'body', login: sender };
   return null;

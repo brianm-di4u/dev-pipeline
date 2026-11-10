@@ -15,7 +15,7 @@ import { tokenCheck } from '../bin/pipeline.mjs';
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const config = (grant = {}) => ({ admins: ['owner'], tiers: {}, delegates: [{ login: 'gardener', approve: true, decide: ['design'], rearm: true, ...grant }] });
 const at = (h, m = 0) => `2026-11-10T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00Z`;
-const say = (body, time, login = 'gardener') => ({ body, user: { login, type: 'User' }, created_at: time, updated_at: time });
+const say = (body, time, login = 'gardener') => ({ body, user: { login, type: 'User' }, author_association: 'COLLABORATOR', created_at: time, updated_at: time });
 const hash = 'abcdef012345'.padEnd(64, '0');
 
 // ---------------------------------------------------------------------------

@@ -281,7 +281,8 @@ const sameLogin = (a, b) => typeof a === 'string' && typeof b === 'string' && a.
 // Whether `login`'s grant in `config` covers every command word. It mirrors
 // .pipeline/lib/authority.mjs, so the hook needs nothing outside this file: an
 // entry the gate would drop grants nothing here either.
-export function grantCovers(config, login, words) {
+// `id` is the session's numeric user id: with an `id` in the grant, it must match.
+export function grantCovers(config, login, words, id = null) {
   const admins = Array.isArray(config?.admins) ? config.admins : [];
   if (!login || admins.some((admin) => sameLogin(admin, login))) return false;
   const adminOnly = config.tiers?.adminOnlyPaths;
@@ -294,6 +295,7 @@ export function grantCovers(config, login, words) {
   const decide = grant.decide ?? [];
   if (!Array.isArray(decide) || !decide.every((cls) => DECISION_CLASSES.includes(cls))) return false;
   if ('since' in grant && !(typeof grant.since === 'string' && SINCE.test(grant.since) && !Number.isNaN(Date.parse(grant.since)))) return false;
+  if ('id' in grant && !(Number.isSafeInteger(grant.id) && grant.id > 0 && grant.id === id)) return false;
   return words.every((word) => (word === 'approve' ? grant.approve === true : word === 'decide' ? decide.length > 0 : grant.rearm === true));
 }
 
@@ -315,13 +317,13 @@ function defaultLocalDelegates(cwd) {
 // default branch's config, read through the API, so editing the working tree
 // changes nothing. Throws on any error or timeout.
 function sessionConfig(cwd) {
-  const login = lookup(['api', 'user', '--jq', '.login'], cwd);
+  const [login, id] = lookup(['api', 'user', '--jq', '[.login, .id] | @tsv'], cwd).split('\t');
   const repo = JSON.parse(lookup(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef'], cwd));
   const content = lookup(
     ['api', `repos/${repo.nameWithOwner}/contents/pipeline.config.json?ref=${repo.defaultBranchRef.name}`, '--jq', '.content'],
     cwd,
   );
-  return { login, repo: repo.nameWithOwner, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
+  return { login, id: Number(id), repo: repo.nameWithOwner, config: JSON.parse(Buffer.from(content, 'base64').toString('utf8')) };
 }
 
 // A delegate's own session may post the commands its grant covers. Any error or
@@ -332,9 +334,9 @@ function sessionConfig(cwd) {
 function defaultDelegateMayPost(words, cwd, targets = []) {
   if (!defaultLocalDelegates(cwd)) return false;
   try {
-    const { login, repo, config } = sessionConfig(cwd);
+    const { login, id, repo, config } = sessionConfig(cwd);
     if (!aimedOnlyAt(targets, repo)) return false;
-    return grantCovers(config, login, words);
+    return grantCovers(config, login, words, id);
   } catch {
     return false;
   }

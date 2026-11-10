@@ -20,6 +20,8 @@ const revertOf = (n, target, day = 11) => ({ ...merge(n, day), body: `Revert-of:
 const approve = (n, login, extra = {}) => ({
   body: `/approve ${hashOf(n).slice(0, 12)}`,
   user: { login, type: 'User' },
+  // GitHub's own word that the commenter has access, which a delegate's command needs.
+  author_association: 'COLLABORATOR',
   created_at: '2026-11-09T10:00:00Z',
   updated_at: '2026-11-09T10:00:00Z',
   ...extra,
@@ -130,7 +132,7 @@ test('a suspension opens a bot issue and re-publishes the gate for open PRs a de
 const suspendIssue = { number: 30, title: 'Delegates suspended: x', labels: [{ name: 'pipeline:delegate-suspended' }], user: BOT_USER, body: '' };
 const commentOn = (body, login) => ({
   action: 'created',
-  comment: { body, user: { login, type: 'User' }, created_at: '2026-11-09T11:00:00Z', updated_at: '2026-11-09T11:00:00Z' },
+  comment: { body, user: { login, type: 'User' }, author_association: 'COLLABORATOR', created_at: '2026-11-09T11:00:00Z', updated_at: '2026-11-09T11:00:00Z' },
   issue: suspendIssue,
 });
 

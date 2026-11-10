@@ -19,6 +19,7 @@ const issue = (number, labels = ['ready'], login = 'owner', extra = {}) => ({
   title: `Task ${number}`,
   state: 'open',
   user: { login },
+  author_association: 'COLLABORATOR',
   labels: labels.map((name) => ({ name })),
   ...extra,
 });
@@ -125,7 +126,9 @@ function askPrWait(cfg, logins) {
       'spec = importlib.util.spec_from_loader("prwait", loader)',
       'mod = importlib.util.module_from_spec(spec)',
       'loader.exec_module(mod)',
-      `print(json.dumps({l: [mod.trusted(l), mod.is_delegate(l)] for l in ${JSON.stringify(logins)}}))`,
+      // A comment as pr-wait reads it: GitHub's access field on it, as a collaborator's has.
+      'node = lambda l: {"author": {"login": l}, "authorAssociation": "COLLABORATOR"}',
+      `print(json.dumps({l: [mod.trusted(node(l)), mod.is_delegate(node(l))] for l in ${JSON.stringify(logins)}}))`,
     ].join('\n');
     const run = spawnSync(python, ['-c', code], { cwd: dir, encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr);
