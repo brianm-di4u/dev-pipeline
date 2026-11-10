@@ -31,6 +31,8 @@ Events
     Macroscope summary changed after that
   - the base branch moved and the new commits touch files in this PR
   - merge state became BEHIND or DIRTY
+  - with `freshness` on, the gate holds the PR until the branch is updated from
+    its base, because the base changed files the PR depends on
   - the PR merged or closed
 
 CodeRabbit is advisory: pr-wait reports it but never waits for it. Comment
@@ -102,6 +104,8 @@ def _delegates(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
             continue
         if "since" in entry and not (isinstance(entry["since"], str) and SINCE.match(entry["since"])):
             continue
+        if "id" in entry and not (type(entry["id"]) is int and entry["id"] > 0):
+            continue
         kept[login] = entry
     return kept
 
@@ -113,12 +117,27 @@ DELEGATES = _delegates(CONFIG)
 DIRECT = frozenset(login for login, grant in DELEGATES.items() if grant.get("direct") is True)
 
 
-def trusted(login: str | None) -> bool:
-    return login in ADMINS or (login or "").lower() in DIRECT
+# A delegate is known by what GitHub says on each comment, as the gate requires:
+# that its author has access to the repo, and, with an `id` in the grant, that it
+# is that account. See identityProblems in .pipeline/lib/contract.mjs.
+ACCESS = ("COLLABORATOR", "MEMBER", "OWNER")
 
 
-def is_delegate(login: str | None) -> bool:
-    return (login or "").lower() in DELEGATES
+def vouched(node: Json) -> bool:
+    author = node.get("author") or {}
+    grant = DELEGATES.get((author.get("login") or "").lower())
+    if grant is None or node.get("authorAssociation") not in ACCESS:
+        return False
+    return grant.get("id") is None or author.get("databaseId") == grant["id"]
+
+
+def trusted(node: Json) -> bool:
+    login = (node.get("author") or {}).get("login")
+    return login in ADMINS or ((login or "").lower() in DIRECT and vouched(node))
+
+
+def is_delegate(node: Json) -> bool:
+    return vouched(node)
 GATING_BOTS = tuple(CONFIG.get("reviewBots", {}).get("gating", []))
 ADVISORY_BOTS = tuple(CONFIG.get("reviewBots", {}).get("advisory", []))
 OWNER_COMMANDS = re.compile(r"^/(approve|decide|rearm)\b")
@@ -135,6 +154,10 @@ TRANSIENT = re.compile(
     re.IGNORECASE,
 )
 FAILED = ("fail", "cancel")
+# The gate marks a hold that only an update from the base can clear. See
+# .pipeline/lib/freshness.mjs.
+GATE_CHECK = "pipeline/gate"
+STALE_MARKER = "<!-- pipeline:stale -->"
 # gh pr checks buckets, worst first. Duplicate names (push and pull_request runs
 # of one job) collapse to the worst bucket.
 RANK = {"fail": 4, "cancel": 3, "pending": 2, "pass": 1, "skipping": 0}
@@ -147,14 +170,14 @@ query($owner: String!, $name: String!, $number: Int!) {
       url state headRefOid baseRefName mergeStateStatus
       author { login }
       baseRef { target { oid } }
-      comments(last: 100) { nodes { id url body author { login __typename } } }
+      comments(last: 100) { nodes { id url body authorAssociation author { login __typename ... on User { databaseId } } } }
       reviews(last: 100) {
-        nodes { id url state body commit { oid } author { login __typename } }
+        nodes { id url state body commit { oid } authorAssociation author { login __typename ... on User { databaseId } } }
       }
       reviewThreads(last: 100) {
         nodes {
           isResolved path line
-          comments(first: 100) { nodes { id url body author { login __typename } } }
+          comments(first: 100) { nodes { id url body authorAssociation author { login __typename ... on User { databaseId } } } }
         }
       }
     }
@@ -407,6 +430,23 @@ class Watcher:
             return []
         return sorted(self.pr_files[head].intersection(moved))
 
+    def gate_stale(self, head: str) -> str:
+        """Whether the gate holds this head for an update from the base: "only" when
+        that's all, "also" when it's blocked for something else too, or ""."""
+        try:
+            proc = gh(["api", f"repos/{self.repo}/commits/{head}/check-runs?check_name=pipeline%2Fgate&filter=latest&per_page=100"])
+            runs = json.loads(proc.stdout).get("check_runs", [])
+        except (GhError, ValueError, AttributeError) as error:
+            log(f"could not read the gate check: {error}")
+            return ""
+        ours = [r for r in runs if r.get("name") == GATE_CHECK and (r.get("app") or {}).get("slug") == "github-actions"]
+        if not ours:
+            return ""
+        output = max(ours, key=lambda r: r.get("id", 0)).get("output") or {}
+        if STALE_MARKER not in (output.get("summary") or ""):
+            return ""
+        return "only" if (output.get("title") or "").endswith("update the branch") else "also"
+
     def behind(self, base: str, base_oid: str | None, head: str) -> str:
         """How far the head is behind its base, for the green and ready lines."""
         if not base_oid:
@@ -450,8 +490,18 @@ class Watcher:
         for name in sorted(gate):
             if bucket(name) in FAILED:
                 link = checks[name]["link"]
-                fail_lines.append(f"{label} failed: {name} {link}")
-                self.emit(f"fail:{head}:{name}:{link}", fail_lines[-1])
+                lines = []
+                stale = self.gate_stale(head) if name == GATE_CHECK else ""
+                if stale:
+                    lines.append(
+                        f"{name} wants the branch updated: {base} changed files this PR depends on. "
+                        f"Merge or rebase {base}, push, and wait again {link}"
+                    )
+                if stale != "only":
+                    # Blocked for something besides the update too, or failed outright.
+                    lines.append(f"{label} failed: {name} {link}")
+                fail_lines.extend(lines)
+                self.emit(f"fail:{head}:{name}:{link}", " | ".join(lines))
         watched = {name: c for name, c in checks.items() if bot_name(name) not in ADVISORY_BOTS}
         gate_done = bool(gate) and all(bucket(n) != "pending" for n in gate)
         all_done = gate_done and all(c["bucket"] != "pending" for c in watched.values())
@@ -468,12 +518,12 @@ class Watcher:
             if login in ADMINS and OWNER_COMMANDS.match(comment["body"].strip()):
                 self.emit(f"c:{comment['id']}", f"owner command from {login}: {snippet(comment['body'])} {comment['url']}")
                 continue
-            if is_delegate(login) and OWNER_COMMANDS.match(comment["body"].strip()):
+            if is_delegate(comment) and OWNER_COMMANDS.match(comment["body"].strip()):
                 self.emit(f"c:{comment['id']}", f"delegate command from {login}: {snippet(comment['body'])} {comment['url']}")
                 continue
             if login in mine or bot_name(login) or (is_bot and any(b in login for b in STATUS_BOTS)):
                 continue
-            tag = "" if trusted(login) else " [untrusted]"
+            tag = "" if trusted(comment) else " [untrusted]"
             self.emit(f"c:{comment['id']}", f"comment from {login}{tag}: {snippet(comment['body'])} {comment['url']}")
         for review in reviews:
             login, is_bot = who(review)
@@ -481,13 +531,13 @@ class Watcher:
                 continue
             if review["state"] in ("APPROVED", "CHANGES_REQUESTED") or review["body"].strip():
                 state = review["state"].lower().replace("_", " ")
-                tag = "" if trusted(login) else " [untrusted]"
+                tag = "" if trusted(review) else " [untrusted]"
                 self.emit(f"c:{review['id']}", f"review from {login}{tag} ({state}): {snippet(review['body'])} {review['url']}")
         unresolved: list[str] = []
         for thread in threads:
             nodes = thread["comments"]["nodes"]
             # An outsider's open thread must not hold up a merge.
-            if not thread["isResolved"] and nodes and (trusted(who(nodes[0])[0]) or bot_name(who(nodes[0])[0]) in GATING_BOTS):
+            if not thread["isResolved"] and nodes and (trusted(nodes[0]) or bot_name(who(nodes[0])[0]) in GATING_BOTS):
                 unresolved.append(nodes[0]["url"])
             where = f"{thread['path']}:{thread['line']}" if thread["line"] else thread["path"]
             for index, comment in enumerate(nodes):
@@ -495,7 +545,7 @@ class Watcher:
                 if login in mine:
                     continue
                 kind = "new thread" if index == 0 else "thread reply"
-                tag = "" if trusted(login) else " [untrusted]"
+                tag = "" if trusted(comment) else " [untrusted]"
                 self.emit(f"c:{comment['id']}", f"{kind} from {login}{tag} on {where}: {snippet(comment['body'])} {comment['url']}")
 
         # Review bots on the current head. A bot with checks is done when they

@@ -47,7 +47,10 @@ async function heldPrs(client, repo, open, evaluate, login) {
     const runs = await client.list(`/repos/${repo}/commits/${pr.head.sha}/check-runs?check_name=pipeline%2Fgate&filter=latest&per_page=100`);
     if (gateCheck(runs)?.conclusion !== 'action_required') continue;
     try {
-      items.push(prItem(pr, await evaluate(client, repo, pr.number), login));
+      const result = await evaluate(client, repo, pr.number);
+      // A branch that needs an update from main is a worker's to fix, not a call to make.
+      if (result.freshness?.stale) continue;
+      items.push(prItem(pr, result, login));
     } catch (error) {
       items.push({ number: pr.number, title: pr.title, url: pr.html_url, error: error.message });
     }
@@ -88,6 +91,8 @@ export async function buildInbox({
   config,
   now,
   login,
+  // The session's numeric user id. With an `id` in the grant, it must match.
+  userId = null,
   evaluate = evaluatePr,
   branches = remoteBranches,
   projectCounts = counts,
@@ -119,10 +124,13 @@ export async function buildInbox({
   const defaultBranch = open[0]?.base?.repo?.default_branch ?? 'main';
   const openHeads = open.filter((pr) => pr.head?.repo?.full_name === repo).map((pr) => pr.head.ref);
 
-  const grant = auth.delegateOf(login);
+  const named = auth.delegateOf(login);
+  // A grant with an id is this session's only if the account is that one.
+  const grant = named && named.id !== null && named.id !== userId ? null : named;
   return {
     login,
     delegate: grant,
+    ...(named && !grant ? { error: `This session's account id is ${userId ?? 'unknown'}, not ${named.login}'s configured id ${named.id}.` } : {}),
     state: {
       mainRed: state.mainRed,
       redIssue: state.redIssue,
@@ -154,10 +162,10 @@ export async function baseConfig(client, repo, defaultBranch) {
 async function inbox() {
   try {
     const { nameWithOwner: repo, defaultBranchRef } = JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef']));
-    const login = gh(['api', 'user', '--jq', '.login']);
+    const [login, id] = gh(['api', 'user', '--jq', '[.login, .id] | @tsv']).split('\t');
     const client = cliClient();
     const config = await baseConfig(client, repo, defaultBranchRef.name);
-    const result = await buildInbox({ client, repo, config, now: new Date(), login });
+    const result = await buildInbox({ client, repo, config, now: new Date(), login, userId: Number(id) });
     console.log(JSON.stringify(result, null, 2));
     return 0;
   } catch (error) {

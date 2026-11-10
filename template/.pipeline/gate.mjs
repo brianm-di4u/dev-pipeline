@@ -3,9 +3,11 @@
 //   node .pipeline/gate.mjs ci                  CI: evaluate from the event, publish a check run
 //   node .pipeline/gate.mjs local [--pr N]      Local: evaluate and print; exit 1 unless mergeable
 //   node .pipeline/gate.mjs classify [--base R] Print this branch's change hash and tier as JSON
+//   node .pipeline/gate.mjs fresh [--base R]    With `freshness` on: exit 1 if this branch needs an update
 //
 // In CI this runs from the default branch through pull_request_target,
-// issue_comment, and workflow_run, so a PR can't change it. It fetches PR objects
+// issue_comment, workflow_run, and a push to the default branch or a schedule
+// (which re-evaluate open PRs when `freshness` is on), so a PR can't change it. It fetches PR objects
 // but never checks them out or runs them, and treats all PR text as data.
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
@@ -22,8 +24,9 @@ import {
   parseVerdict,
   touchMarkers,
 } from './lib/contract.mjs';
+import { freshnessOf, isStaleSummary } from './lib/freshness.mjs';
 import { evaluateGate } from './lib/gate-core.mjs';
-import { changeSet, git, readBlob, tryGit } from './lib/git.mjs';
+import { changeSet, git, rawChanges, readBlob, tryGit } from './lib/git.mjs';
 import { cliClient, tokenClient } from './lib/github.mjs';
 import { claimedRevert, verifyCleanRevert } from './lib/revert.mjs';
 import { readRepoState } from './lib/state.mjs';
@@ -105,7 +108,7 @@ export async function delegateInputs(client, repo, number, comments, { pr = null
 }
 
 const EDITS_QUERY =
-  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){userContentEdits(first:100){nodes{editedAt editor{login}}}}}}';
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){userContentEdits(first:100){nodes{editedAt editor{login ... on User{databaseId}}}}}}}';
 
 async function recordedTouches(client, repo, number, pr, config) {
   const auth = authority(config);
@@ -116,7 +119,7 @@ async function recordedTouches(client, repo, number, pr, config) {
     const activity = await client.list(`/repos/${repo}/activity?ref=${ref}&per_page=100`);
     for (const entry of activity) {
       const pushed = ['push', 'force_push'].includes(entry.activity_type);
-      if (pushed && Date.parse(entry.timestamp) > opened && auth.delegateOf(entry.actor?.login)) {
+      if (pushed && Date.parse(entry.timestamp) > opened && auth.delegateOfUser(entry.actor)) {
         touches.push({ kind: 'push', login: entry.actor.login, at: entry.timestamp });
       }
     }
@@ -126,7 +129,7 @@ async function recordedTouches(client, repo, number, pr, config) {
   const edits = response?.data?.repository?.pullRequest?.userContentEdits?.nodes;
   if (!Array.isArray(edits)) throw new Error(`Could not read the edit history of #${number}`);
   for (const change of edits) {
-    if (Date.parse(change.editedAt) > opened && auth.delegateOf(change.editor?.login)) {
+    if (Date.parse(change.editedAt) > opened && auth.delegateOfUser({ login: change.editor?.login, id: change.editor?.databaseId })) {
       touches.push({ kind: 'body', login: change.editor.login, at: change.editedAt });
     }
   }
@@ -138,7 +141,7 @@ async function recordedTouches(client, repo, number, pr, config) {
 export function touchOf(eventName, event, config) {
   if (eventName !== 'pull_request_target') return null;
   const sender = event.sender?.login;
-  if (!sender || event.sender?.type === 'Bot' || !authority(config).delegateOf(sender)) return null;
+  if (!sender || event.sender?.type === 'Bot' || !authority(config).delegateOfUser(event.sender)) return null;
   if (event.action === 'synchronize') return { kind: 'push', login: sender };
   if (event.action === 'edited' && event.changes?.body) return { kind: 'body', login: sender };
   return null;
@@ -219,6 +222,16 @@ export async function gather({ client, repo, number, cwd, localEvidence = false 
     verify = pickCheck(checkRuns, config.verify.checkNames ?? ['verify']);
   }
 
+  // Only with freshness configured: what main changed since this branch's base,
+  // and which main that was, so a publish can tell if main moved since, and the
+  // check can say which main it was evaluated against.
+  let fresh = {};
+  if (config.freshness) {
+    const baseSha = git(['rev-parse', baseRef], cwd).trim();
+    const freshness = freshnessOf(config.freshness, rawChanges(mergeBase, baseRef, cwd).map((c) => c.path), changes.map((c) => c.path));
+    fresh = { freshness: { ...freshness, base: baseSha }, baseSha };
+  }
+
   return {
     pr: {
       number,
@@ -242,7 +255,93 @@ export async function gather({ client, repo, number, cwd, localEvidence = false 
     citesMainRed: state.citesMainRed,
     breakerTripped: state.breakerTripped,
     ...extra,
+    ...fresh,
   };
+}
+
+const mainSha = async (client, repo, branch) => (await client.get(`/repos/${repo}/git/ref/heads/${branch}`))?.object?.sha ?? null;
+
+export async function latestGate(client, repo, sha) {
+  const runs = await client.list(`/repos/${repo}/commits/${sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest&per_page=100`);
+  return runs.filter((run) => run.name === CHECK_NAME && run.app?.slug === 'github-actions').sort((a, b) => b.id - a.id)[0] ?? null;
+}
+
+const heldStale = (check) => check?.conclusion === 'failure' && isStaleSummary(check.output?.summary);
+
+// Whether another run published this gate check after `since`.
+export const publishedSince = (check, since) => Boolean(check) && Date.parse(check.started_at ?? check.completed_at) > Date.parse(since);
+
+// With freshness on, a pass must hold for the main that is current when it goes
+// out, or a branch that a merge made stale could stay green. So the run reads main
+// before publishing a pass and again after it. If main moved since the evaluation,
+// it evaluates again and publishes that, so the last writer is never stale.
+// Anything but a pass publishes at once, since it can't merge. If main keeps
+// moving, the newest evaluation goes out, and the run for the newest main, or the
+// hourly re-check, follows it.
+export async function publishFresh(client, repo, number, cwd, input, result, options = {}, again = null) {
+  const evaluateAgain =
+    again ??
+    (async () => {
+      const next = await gather({ client, repo, number, cwd });
+      return { input: next, result: evaluateGate(next) };
+    });
+  if (!input.freshness) {
+    await publish(client, repo, input, result, options);
+    return { input, result };
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (result.conclusion === 'success' && (await mainSha(client, repo, input.defaultBranch)) !== input.baseSha) {
+      ({ input, result } = await evaluateAgain());
+      continue;
+    }
+    await publish(client, repo, input, result, options);
+    if (result.conclusion !== 'success' || (await mainSha(client, repo, input.defaultBranch)) === input.baseSha) return { input, result };
+    ({ input, result } = await evaluateAgain());
+  }
+  await publish(client, repo, input, result, options);
+  return { input, result };
+}
+
+// Main moved, or it's the hourly re-check. With freshness on, find each open PR
+// whose freshness this main changes: stale now but not held as stale, or held as
+// stale but no longer stale, as when main reverts the change it overlapped.
+// Freshness comes from local git, so this costs one API call per open PR, and only
+// those PRs are evaluated in full. Without freshness, nothing.
+export async function mainMoved(client, repo, config, cwd = process.cwd(), { republish = reevaluate, since = new Date().toISOString(), freshnessOfPr = null } = {}) {
+  if (!config.freshness) return { skipped: 'freshness is not configured' };
+  const open = (await client.list(`/repos/${repo}/pulls?state=open&per_page=100`)).filter(
+    (pr) => !pr.draft && pr.base?.ref === pr.base?.repo?.default_branch,
+  );
+  if (open.length === 0) return { reevaluated: [] };
+  const fresh = freshnessOfPr ?? localFreshness(cwd, open[0].base.repo.default_branch, open.map((pr) => pr.number));
+  const numbers = [];
+  for (const pr of open) {
+    const held = heldStale(await latestGate(client, repo, pr.head.sha));
+    let stale;
+    try {
+      stale = fresh(pr.number).stale;
+    } catch (error) {
+      console.error(`Could not read the freshness of #${pr.number}: ${error.message}`);
+      stale = !held;
+    }
+    if (stale !== held) numbers.push(pr.number);
+  }
+  return { reevaluated: await republish(client, repo, numbers, cwd, { since }) };
+}
+
+function localFreshness(cwd, defaultBranch, numbers) {
+  const heads = numbers.map((n) => `+refs/pull/${n}/head:refs/pipeline/pr/${n}`);
+  git(['fetch', '--no-tags', '--quiet', 'origin', `+refs/heads/${defaultBranch}:refs/pipeline/base`, ...heads], cwd);
+  return (number) => freshAt('refs/pipeline/base', `refs/pipeline/pr/${number}`, cwd);
+}
+
+// With freshness on, a commit may still carry a pass from before main moved: a
+// branch pushed back to an earlier commit, or a new PR opened at one. So a run for
+// a new head marks the gate in progress on it before evaluating anything.
+export function evaluatingBody(pr, config, runId = process.env.GITHUB_RUN_ID) {
+  const input = { pr: { head: pr.head.sha, url: pr.html_url }, config };
+  const result = { status: 'in_progress', conclusion: null, title: 'Evaluating', summary: 'The gate is evaluating this commit against the current main.' };
+  return checkRunBody(input, result, runId);
 }
 
 function readLocalEvidence(hash, cwd = process.cwd()) {
@@ -274,16 +373,21 @@ async function publish(client, repo, input, result, options) {
 }
 
 // Evaluate and publish again, for when state outside the PR changed: a delegate
-// suspension voids approvals that already turned checks green.
-export async function reevaluate(client, repo, numbers, cwd = process.cwd()) {
+// suspension voids approvals that already turned checks green, and with freshness
+// on, main moved. With `since`, a PR whose gate another run published after that
+// moment is left alone, since this evaluation may be the older one.
+export async function reevaluate(client, repo, numbers, cwd = process.cwd(), { since = null } = {}) {
   const results = [];
   for (const number of numbers) {
     const pr = await client.get(`/repos/${repo}/pulls/${number}`);
     if (pr.state !== 'open') continue;
     try {
-      const input = await gather({ client, repo, number, cwd });
-      const result = evaluateGate(input);
-      await publish(client, repo, input, result, { republish: true });
+      const gathered = await gather({ client, repo, number, cwd });
+      if (since && publishedSince(await latestGate(client, repo, gathered.pr.head), since)) {
+        results.push({ number, conclusion: 'skipped' });
+        continue;
+      }
+      const { result } = await publishFresh(client, repo, number, cwd, gathered, evaluateGate(gathered), { republish: true });
       results.push({ number, conclusion: result.conclusion ?? result.status });
     } catch (error) {
       console.error(error);
@@ -346,6 +450,7 @@ async function echoApproval(client, repo, input, event, result) {
 }
 
 async function runCi() {
+  const started = new Date().toISOString();
   const eventName = process.env.GITHUB_EVENT_NAME;
   const repo = process.env.GITHUB_REPOSITORY;
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
@@ -363,28 +468,39 @@ async function runCi() {
     return 0;
   }
 
+  if (eventName === 'push' || eventName === 'schedule') {
+    // gate.yml runs on a push to the default branch, and hourly, from that branch.
+    // The hourly run catches a PR that a failed push run left green.
+    if (eventName === 'push' && event.ref !== `refs/heads/${event.repository?.default_branch}`) return 0;
+    const outcome = await mainMoved(client, repo, parseConfig(readFileSync('pipeline.config.json', 'utf8')), process.cwd(), { since: started });
+    console.log(JSON.stringify(outcome));
+    return outcome.reevaluated?.some((r) => r.conclusion === 'error') ? 1 : 0;
+  }
+
   const numbers = await resolvePrNumbers(eventName, event, client, repo);
   if (numbers.length === 0) console.log('No open PR for this event.');
   // This job runs on a checkout of the default branch, so its config is policy.
   // A delegate's touch is marked before evaluating, so this run already counts it.
   // A config that can't be read here fails in gather, per PR, as it always has.
-  let touch = null;
+  let policy = null;
   if (eventName === 'pull_request_target') {
     try {
-      touch = touchOf(eventName, event, parseConfig(readFileSync('pipeline.config.json', 'utf8'), { warn: () => {} }));
+      policy = parseConfig(readFileSync('pipeline.config.json', 'utf8'), { warn: () => {} });
     } catch {
-      touch = null;
+      policy = null;
     }
   }
+  const touch = policy ? touchOf(eventName, event, policy) : null;
+  const newHead = Boolean(policy?.freshness) && ['opened', 'reopened', 'synchronize'].includes(event.action);
   let failed = false;
   for (const number of numbers) {
     const pr = await client.get(`/repos/${repo}/pulls/${number}`);
     if (pr.state !== 'open') continue;
     try {
+      if (newHead) await client.post(`/repos/${repo}/check-runs`, evaluatingBody(pr, policy));
       if (touch) await markTouch(client, repo, number, touch);
-      const input = await gather({ client, repo, number, cwd: process.cwd() });
-      const result = evaluateGate(input);
-      await publish(client, repo, input, result);
+      const gathered = await gather({ client, repo, number, cwd: process.cwd() });
+      const { input, result } = await publishFresh(client, repo, number, process.cwd(), gathered, evaluateGate(gathered));
       report(number, result);
       if (eventName === 'issue_comment') {
         // A failed notification must not change the merge decision, which is
@@ -467,12 +583,34 @@ function runClassify(args) {
   return 0;
 }
 
+// For a worker about to merge: does this branch need an update first? Policy
+// comes from the base, as in the gate. Prints the freshness result as JSON.
+export function freshAt(baseRef, headRef = 'HEAD', cwd = process.cwd()) {
+  const configText = readBlob(baseRef, 'pipeline.config.json', cwd);
+  if (configText === null) throw new Error(`pipeline.config.json is missing from ${baseRef}`);
+  const config = parseConfig(configText, { warn: () => {} });
+  if (!config.freshness) return { configured: false, stale: false };
+  const { mergeBase, changes } = changeSet(baseRef, headRef, cwd);
+  const mainPaths = rawChanges(mergeBase, baseRef, cwd).map((c) => c.path);
+  return { configured: true, ...freshnessOf(config.freshness, mainPaths, changes.map((c) => c.path)) };
+}
+
+function runFresh(args) {
+  const baseRef = arg(args, '--base') ?? 'origin/main';
+  const remote = /^origin\/(.+)$/.exec(baseRef);
+  if (remote) tryGit(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${remote[1]}:refs/remotes/origin/${remote[1]}`]);
+  const result = freshAt(baseRef);
+  console.log(JSON.stringify(result, null, 2));
+  return result.stale ? 1 : 0;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === 'ci') return runCi();
   if (command === 'local') return runLocal(args);
   if (command === 'classify') return runClassify(args);
-  console.error('Usage: gate.mjs ci | local [--pr N] [--evidence] | classify [--base REF]');
+  if (command === 'fresh') return runFresh(args);
+  console.error('Usage: gate.mjs ci | local [--pr N] [--evidence] | classify [--base REF] | fresh [--base REF]');
   return 2;
 }
 

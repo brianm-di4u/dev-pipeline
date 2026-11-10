@@ -88,6 +88,14 @@ test('the gate is required to run from the default branch', () => {
   assert.match(gate, /checks:\s*write/);
 });
 
+test('the gate runs on a push to main only, and hourly, so open PRs are re-evaluated', () => {
+  const gate = readFileSync(join(root, 'template/.github/workflows/gate.yml'), 'utf8');
+  assert.match(gate, /^ {2}push:\n {4}branches: \[main\]\n/m);
+  assert.match(gate, /^ {2}schedule:\n {4}- cron: '\d+ \* \* \* \*'\n/m);
+  // gate.mjs does the rest, and only with freshness configured.
+  assert.match(readFileSync(join(root, 'template/.pipeline/gate.mjs'), 'utf8'), /eventName === 'push' \|\| eventName === 'schedule'/);
+});
+
 test('verify is not gated by anything that lets a skip read as success', () => {
   const ci = readFileSync(join(root, 'template/.github/workflows/ci.yml'), 'utf8');
   assert.match(ci, /^\s*verify:/m);

@@ -1,20 +1,23 @@
 // Autopilot's decisions as plain code: whether to keep going, and what to do next.
 import { toAuthority } from './authority.mjs';
+import { identityProblems } from './contract.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
 
 // Issues from outsiders never start work, whatever labels they carry. Agent-filed
 // issues carry the owner's login, so they arrive labeled `triage` and need a
 // verifier before they count as `ready`. A delegate whose grant has `direct` can
-// start work too. `auth` is a bare admins list, a config, or an authority.
+// start work too, when GitHub shows its access on the issue, as for its commands.
+// `auth` is a bare admins list, a config, or an authority.
 export function eligible(issue, auth) {
   const labels = (issue.labels ?? []).map((label) => (typeof label === 'string' ? label : label.name));
   const who = toAuthority(auth);
   const login = issue.user?.login;
+  const grant = who.delegateOf(login);
   return (
     !issue.pull_request &&
     issue.state === 'open' &&
-    (who.isAdmin(login) || who.delegateOf(login)?.direct === true) &&
+    (who.isAdmin(login) || (grant?.direct === true && identityProblems(issue, grant).length === 0)) &&
     labels.includes('ready') &&
     !labels.includes('triage') &&
     !labels.includes('blocked:decision') &&

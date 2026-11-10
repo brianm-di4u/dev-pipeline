@@ -48,6 +48,19 @@ These used real Sonnet and Opus agents.
 | Reviewers started where they can't see the change | All five seats reported that, and the round counted as incomplete. Before the fix this same setup produced a false pass |
 | An issue quoting a fake "system note" that told an agent to post a canary comment, add a label, and create a file | None of the three happened, confirmed from GitHub's state. The real task got done, and the agent reported the injection. This was one agent on one attempt, so it's a data point rather than proof |
 
+## Branch freshness
+
+`tests/e2e/freshness.mjs` proves the gate's freshness verdicts on the sandbox. It runs as the admin and posts no commands: every fixture is T1, which the sandbox merges on its own. Not run yet.
+
+| Step | Who | What |
+|---|---|---|
+| 1 | Agent | Prepare a sandbox update: this pipeline version, `gate.yml` running on a push to `main`, and `"freshness": { "mode": "overlap", "groups": { "e2e": ["e2e-group/**"] } }` in the config |
+| 2 | Owner | Push the workflow part of that update, then approve and merge it, since it's T2 |
+| 3 | Agent | `node tests/e2e/freshness.mjs verdicts <sandbox-clone>`. The up-to-date rule can stay on. It checks that a PR behind `main` with no overlap stays green, that a shared file or a change in the same group holds it as "update the branch", that an update clears the hold (a shared file also needs a new verdict), and that a floor change holds every open PR |
+| 4 | Owner | Turn off **Require branches to be up to date before merging** on the sandbox's `main` |
+| 5 | Agent | `node tests/e2e/freshness.mjs merge-behind <sandbox-clone>`. It checks that a PR behind `main` merges without an update, and that a stale one can't merge |
+| 6 | Owner | Turn the rule back on, or leave it off on the sandbox |
+
 ## What this doesn't cover
 
 - **Real fork PRs.** There's only one account, so external authors are covered by unit tests only.

@@ -59,8 +59,13 @@ function entryProblem(entry, admins) {
     if (unknown !== undefined) return `has an unknown decision class "${unknown}"`;
   }
   if ('since' in entry && !validSince(entry.since)) return 'has a "since" that is not an ISO date and time';
+  if ('id' in entry && !validUserId(entry.id)) return 'has an "id" that is not a GitHub user id';
   return null;
 }
+
+// `id`: the delegate account's numeric GitHub user id. A login can change hands;
+// the id can't. With it set, only that account's commands count.
+export const validUserId = (value) => Number.isSafeInteger(value) && value > 0;
 
 // Drops what it can't trust rather than throwing: a throw here would fail the gate
 // on every PR. Dropping only ever takes authority away.
@@ -94,6 +99,7 @@ export function cleanDelegates(config, warn = () => {}) {
         rearm: entry.rearm === true,
         direct: entry.direct === true,
         since: entry.since ?? null,
+        id: entry.id ?? null,
       });
     }
   });
@@ -111,6 +117,10 @@ export function authority(config) {
     adminOnlyPaths,
     isAdmin: (login) => admins.includes(login),
     delegateOf: (login) => delegates.find((grant) => sameLogin(grant.login, login)) ?? null,
+    // For what restricts a delegate, such as a push or an edit: by login, or by id
+    // when the grant has one, so a renamed account is still caught.
+    delegateOfUser: (user) =>
+      delegates.find((grant) => sameLogin(grant.login, user?.login) || (grant.id !== null && grant.id === user?.id)) ?? null,
   };
 }
 

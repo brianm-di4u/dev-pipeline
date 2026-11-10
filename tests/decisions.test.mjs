@@ -21,6 +21,8 @@ const user = (body, login = 'owner', minute = 10, extra = {}) => ({
   id: 1000 + minute,
   body,
   user: { login, type: 'User' },
+  // GitHub's own word that the commenter has access, which a delegate's command needs.
+  author_association: 'COLLABORATOR',
   created_at: at(minute),
   updated_at: at(minute),
   ...extra,

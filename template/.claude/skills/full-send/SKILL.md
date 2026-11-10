@@ -13,9 +13,10 @@ You own this change from its current state to a merged PR. Nobody's watching, an
 2. **Prove it** with the `prove` skill, for every change you made.
 3. **Review it** with the `council` skill until it says `done`. If it says `parked`, leave the PR open with a summary and report it.
 4. **File the PR** with the `file-pr` skill, after rebasing onto the latest `main`, with the verdict block in the body.
-5. **Merge when the gate allows it.** On a public repo:
+5. **Merge when the gate allows it.** On a public repo, check first that the branch doesn't need an update from `main`. It exits 1 if it does: update from `main`, push, and babysit again before merging.
 
    ```bash
+   node .pipeline/gate.mjs fresh
    gh pr merge <n> --auto --squash
    ```
 

@@ -190,12 +190,55 @@ async function firstBlock(client, repo, sha) {
   return blocks[0] ?? null;
 }
 
+// Only with freshness configured: which merges landed while behind main, and
+// whether a revert or a red main followed one, so the admin can judge the trade.
+// A merge's first parent is main just before it; the PR was behind if its head
+// lacked any of that. Null where GitHub couldn't say.
+async function behindMerges(client, repo, merged) {
+  const behind = new Map();
+  for (const pr of merged) {
+    if (claimedRevert(pr.body) || !pr.merge_commit_sha || !pr.head?.sha) continue;
+    try {
+      const parent = (await client.get(`/repos/${repo}/commits/${pr.merge_commit_sha}`))?.parents?.[0]?.sha;
+      const compare = parent ? await client.get(`/repos/${repo}/compare/${parent}...${pr.head.sha}`) : null;
+      behind.set(pr.number, typeof compare?.behind_by === 'number' ? compare.behind_by > 0 : null);
+    } catch {
+      behind.set(pr.number, null);
+    }
+  }
+  return behind;
+}
+
+const RED_AT = /Main is red at ([0-9a-f]{7,40})/;
+const sameSha = (a, b) => Boolean(a && b) && (a.startsWith(b) || b.startsWith(a));
+
+export function freshnessSummary(merged, behind, redIssues) {
+  const revertedShas = merged.map((pr) => claimedRevert(pr.body)).filter(Boolean);
+  const whileBehind = merged.filter((pr) => behind.get(pr.number) === true);
+  const values = [...behind.values()];
+  return {
+    checked: values.filter((value) => value !== null).length,
+    unknown: values.filter((value) => value === null).length,
+    whileBehind: whileBehind.map((pr) => pr.number),
+    reverted: whileBehind.filter((pr) => revertedShas.some((sha) => sameSha(pr.merge_commit_sha, sha))).map((pr) => pr.number),
+    redMain: redIssues
+      .filter((issue) => whileBehind.some((pr) => sameSha(pr.merge_commit_sha, RED_AT.exec(issue.title ?? '')?.[1])))
+      .map((issue) => issue.number),
+  };
+}
+
 export async function buildDigest({ client, repo, now, config, botIssues, since: from = null, extended = false }) {
   const since = from ?? new Date(now.getTime() - 7 * DAY).toISOString();
   const auth = authority(config);
   const wide = extended || auth.delegates.length > 0;
   const pulls = await client.list(`/repos/${repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100`);
   const merged = pulls.filter((pr) => pr.merged_at && pr.merged_at >= since);
+  let fresh = null;
+  if (config.freshness) {
+    const red = await botIssues(client, repo, 'pipeline:main-red', 'all').catch(() => []);
+    fresh = freshnessSummary(merged, await behindMerges(client, repo, merged), red.filter((issue) => issue.created_at >= since));
+  }
+  const withFreshness = (summary) => (fresh ? { ...summary, freshness: fresh } : summary);
 
   const commentsByPr = new Map();
   for (const pr of merged) {
@@ -219,7 +262,7 @@ export async function buildDigest({ client, repo, now, config, botIssues, since:
   // Downloads are a nicety. A failed read shouldn't cost the admin the whole digest.
   const releases = await client.list(`/repos/${repo}/releases?per_page=10`).catch(() => []);
   if (!wide) {
-    return { since, summary: summarize({ merged, commentsByPr, decisions, config }), decisions, state, downloads: releaseDownloads(releases) };
+    return { since, summary: withFreshness(summarize({ merged, commentsByPr, decisions, config })), decisions, state, downloads: releaseDownloads(releases) };
   }
 
   // The delegate measures. Each extra read is skipped on failure, not fatal.
@@ -257,16 +300,33 @@ export async function buildDigest({ client, repo, now, config, botIssues, since:
     open: raised.filter((issue) => issue.state === 'open').map((issue) => issue.number),
   };
 
-  const summary = summarize({
-    merged,
-    commentsByPr,
-    decisions,
-    config,
-    firstBlocks,
-    escalations,
-    reactions: tallyReactions(rationales, reactionsById, config.admins),
-  });
+  const summary = withFreshness(
+    summarize({
+      merged,
+      commentsByPr,
+      decisions,
+      config,
+      firstBlocks,
+      escalations,
+      reactions: tallyReactions(rationales, reactionsById, config.admins),
+    }),
+  );
   return { since, summary, decisions, state, downloads: releaseDownloads(releases), extended: true };
+}
+
+function freshnessSection(f) {
+  const refs = (numbers) => (numbers.length ? ` (${numbers.map((n) => `#${n}`).join(', ')})` : '');
+  return [
+    '',
+    '## Merging while behind main',
+    '',
+    `- Merged while behind main: ${f.whileBehind.length} of ${f.checked}${refs(f.whileBehind)}`,
+    `- Reverted afterwards: ${f.reverted.length}${refs(f.reverted)}`,
+    // A lower bound: post-merge drops a queued run when another queues, so a merge's
+    // red can surface on a later commit, and no second red issue opens while one is.
+    `- Main went red at one: at least ${f.redMain.length}${refs(f.redMain)}. A red main reported on a later merge's run, or while main was already red, isn't counted`,
+    ...(f.unknown ? [`- Not checked: ${f.unknown}, because GitHub couldn't be read`] : []),
+  ];
 }
 
 // Total downloads per published release, with the most-fetched asset of each.
@@ -345,6 +405,7 @@ export function renderDigest({ since, summary: s, decisions, state, downloads = 
     `| Reverts | ${s.reverted.length} |`,
   );
   if (wide) lines.push(...delegateSection(s));
+  if (s.freshness) lines.push(...freshnessSection(s.freshness));
   lines.push('', '## How authors answered findings', '');
   const entries = Object.entries(s.dispositions);
   lines.push(...(entries.length ? entries.map(([k, v]) => `- ${k}: ${v}`) : ['No findings this week.']));

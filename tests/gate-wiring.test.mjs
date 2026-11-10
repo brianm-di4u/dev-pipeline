@@ -19,6 +19,8 @@ const say = (body, login = 'owner', time = at(10), extra = {}) => ({
   id: Date.parse(time) / 1000,
   body,
   user: { login, type: 'User' },
+  // GitHub's own word that the commenter has access, which a delegate's command needs.
+  author_association: 'COLLABORATOR',
   created_at: time,
   updated_at: time,
   ...extra,

@@ -36,6 +36,8 @@ const change = (path, newMode = '100644') => ({ path, oldMode: '100644', newMode
 const comment = (body, login = 'owner', extra = {}) => ({
   body,
   user: { login, type: 'User' },
+  // GitHub's own word that the commenter has access, which a delegate's command needs.
+  author_association: 'COLLABORATOR',
   created_at: '2026-11-09T10:00:00Z',
   updated_at: '2026-11-09T10:00:00Z',
   ...extra,
@@ -210,7 +212,7 @@ test('a valid delegate is kept, with every grant spelled out', () => {
   const { config, warnings } = parseQuietly(withDelegates([{ login: 'gardener', approve: true, decide: ['design'] }]));
   assert.deepEqual(warnings, []);
   assert.deepEqual(config.delegates, [
-    { login: 'gardener', approve: true, approveExternal: false, approveWorkflows: false, decide: ['design'], rearm: false, direct: false, since: null },
+    { login: 'gardener', approve: true, approveExternal: false, approveWorkflows: false, decide: ['design'], rearm: false, direct: false, since: null, id: null },
   ]);
 });
 
