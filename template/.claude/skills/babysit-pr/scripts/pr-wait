@@ -97,13 +97,20 @@ def _delegates(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     kept: dict[str, dict[str, Any]] = {}
     trusted_bots = {str(b).lower() for b in config.get("trustedBots", []) if isinstance(b, str)}
     for entry in entries:
-        if not isinstance(entry, dict) or ("login" in entry) == ("app" in entry):
+        if not isinstance(entry, dict):
             continue
-        if "app" in entry:
+        # As in authority.mjs: null means absent, and a login equal to the App's bot is its own.
+        app = entry.get("app")
+        has_app = app is not None
+        derived = has_app and isinstance(app, dict) and isinstance(app.get("slug"), str) and str(entry.get("login") or "").lower() == f"{app['slug']}[bot]".lower()
+        has_login = entry.get("login") is not None and not derived
+        if has_app == has_login:
+            continue
+        if has_app:
             app = entry["app"]
             if not (isinstance(app, dict) and set(app) <= {"id", "slug"} and type(app.get("id")) is int and app["id"] > 0):
                 continue
-            if app["id"] == ACTIONS_APP_ID or not (isinstance(app.get("slug"), str) and SLUG.match(app["slug"])) or "id" in entry:
+            if app["id"] == ACTIONS_APP_ID or not (isinstance(app.get("slug"), str) and SLUG.match(app["slug"])) or entry.get("id") is not None:
                 continue
             login = f"{app['slug']}[bot]".lower()
             if login == PIPELINE_BOT or login in trusted_bots:

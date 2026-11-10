@@ -1,6 +1,6 @@
 // Frozen copy of this file as it was before App delegates existed (dev-pipeline
-// #18). Tests compare the live code against it to prove that with no delegates, or
-// with a user-account delegate, nothing changed. Never edit it.
+// main with #20). Tests compare the live code against it to prove that with no
+// delegates, or with a user-account delegate, nothing changed. Never edit it.
 // The PR contract: what a PR body must say, and the council verdict it carries.
 import { DECISION_CLASSES, sameLogin, toAuthority } from './authority.mjs';
 

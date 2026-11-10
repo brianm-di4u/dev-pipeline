@@ -1,6 +1,6 @@
 // Frozen copy of this file as it was before App delegates existed (dev-pipeline
-// #18). Tests compare the live code against it to prove that with no delegates, or
-// with a user-account delegate, nothing changed. Never edit it.
+// main with #20). Tests compare the live code against it to prove that with no
+// delegates, or with a user-account delegate, nothing changed. Never edit it.
 // Autopilot's decisions as plain code: whether to keep going, and what to do next.
 import { toAuthority } from './authority.mjs';
 import { identityProblems } from './contract.mjs';

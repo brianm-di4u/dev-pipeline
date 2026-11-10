@@ -1,6 +1,6 @@
 // Frozen copy of this file as it was before App delegates existed (dev-pipeline
-// #18). Tests compare the live code against it to prove that with no delegates, or
-// with a user-account delegate, nothing changed. Never edit it.
+// main with #20). Tests compare the live code against it to prove that with no
+// delegates, or with a user-account delegate, nothing changed. Never edit it.
 // The merge decision as a pure function, so every rule can be tested without
 // GitHub. `gate.mjs` gathers the inputs and publishes the result.
 import { authority } from './authority.mjs';

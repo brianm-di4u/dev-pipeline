@@ -287,7 +287,7 @@ function appEntryValid(entry, trustedBots) {
   const app = entry.app;
   if (!app || typeof app !== 'object' || Array.isArray(app) || Object.keys(app).some((key) => !['id', 'slug'].includes(key))) return false;
   if (!(Number.isSafeInteger(app.id) && app.id > 0) || app.id === ACTIONS_APP_ID) return false;
-  if (typeof app.slug !== 'string' || !SLUG.test(app.slug) || 'id' in entry) return false;
+  if (typeof app.slug !== 'string' || !SLUG.test(app.slug) || entry.id != null) return false;
   const bot = entryLogin(entry);
   return !sameLogin(bot, 'github-actions[bot]') && !trustedBots.some((other) => sameLogin(other, bot));
 }
@@ -304,9 +304,12 @@ export function grantCovers(config, login, words, id = null, appId = null) {
   if (adminOnly !== undefined && !(Array.isArray(adminOnly) && adminOnly.every((p) => typeof p === 'string'))) return false;
   const grant = (Array.isArray(config?.delegates) ? config.delegates : []).find((entry) => sameLogin(entryLogin(entry), login));
   if (!grant) return false;
-  if ('login' in grant === 'app' in grant) return false;
+  // As in authority.mjs: null means absent, and a login equal to the App's bot is its own.
+  const hasApp = grant.app != null;
+  const hasLogin = grant.login != null && !(hasApp && sameLogin(grant.login, entryLogin(grant)));
+  if (hasApp === hasLogin) return false;
   const trustedBots = Array.isArray(config.trustedBots) ? config.trustedBots.filter((bot) => typeof bot === 'string') : [];
-  if ('app' in grant && !(appEntryValid(grant, trustedBots) && grant.app.id === appId)) return false;
+  if (hasApp && !(appEntryValid(grant, trustedBots) && grant.app.id === appId)) return false;
   for (const flag of ['approve', 'approveExternal', 'approveWorkflows', 'rearm', 'direct']) {
     if (flag in grant && typeof grant[flag] !== 'boolean') return false;
   }

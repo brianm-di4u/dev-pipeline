@@ -72,12 +72,17 @@ function appProblem(app, trustedBots) {
 
 function entryProblem(entry, admins, trustedBots) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'is not an object';
-  if ('login' in entry === 'app' in entry) return 'needs exactly one of "login" and "app"';
-  if ('app' in entry) {
+  // Null means absent, and cleaning writes an App entry's bot as its login, so the
+  // gate's second clean of a cleaned config keeps every entry.
+  const hasApp = entry.app != null;
+  const derived = hasApp && typeof entry.app.slug === 'string' && sameLogin(entry.login, botLogin(entry.app.slug));
+  const hasLogin = entry.login != null && !derived;
+  if (hasApp === hasLogin) return 'needs exactly one of "login" and "app"';
+  if (hasApp) {
     const problem = appProblem(entry.app, trustedBots);
     if (problem) return problem;
     // An App is pinned by its own id, so a user id has no place here.
-    if ('id' in entry) return 'has an "id", which is for a user account; an App is pinned by "app.id"';
+    if (entry.id != null) return 'has an "id", which is for a user account; an App is pinned by "app.id"';
   } else {
     if (typeof entry.login !== 'string' || !LOGIN.test(entry.login)) return 'has no valid login';
     if (admins.some((admin) => sameLogin(admin, entry.login))) return 'is also an admin';

@@ -18,6 +18,7 @@ import * as hook from '../template/.claude/hooks/delegate-token.mjs';
 import { grantMismatch } from '../template/.pipeline/garden.mjs';
 import { touchOf } from '../template/.pipeline/gate.mjs';
 import { authority, cleanDelegates } from '../template/.pipeline/lib/authority.mjs';
+import { loadConfig } from '../template/.pipeline/lib/config.mjs';
 import { actorOf, decisionProblems, delegateRefusals, findApproval, findDecision, rearmBy, renderClassMarker } from '../template/.pipeline/lib/contract.mjs';
 import { evaluateGate } from '../template/.pipeline/lib/gate-core.mjs';
 import { eligible } from '../template/.pipeline/lib/queue.mjs';
@@ -75,6 +76,29 @@ test('a malformed App entry is dropped with a warning, never thrown', () => {
   const warnings = [];
   assert.equal(cleanDelegates({ admins: ['owner'], delegates: [{ app: APP }, { app: { ...APP, slug: 'other' } }] }, (m) => warnings.push(m)).length, 1);
   assert.match(warnings[0], /listed twice/);
+});
+
+test('cleaning twice keeps App and user entries alike, and the floor through the real path', () => {
+  const both = { admins: ['owner'], tiers: {}, delegates: [{ app: APP, approve: true, since: '2026-11-10T00:00:00Z' }, { login: 'gardener', approve: true, id: 42 }, { login: 'helper' }] };
+  const once = cleanDelegates(both);
+  assert.equal(once.length, 3);
+  const warnings = [];
+  assert.deepEqual(cleanDelegates({ ...both, delegates: once }, (m) => warnings.push(m)), once);
+  assert.deepEqual(warnings, []);
+  // A login on an App entry other than its own bot is still refused.
+  assert.deepEqual(cleanDelegates({ admins: ['owner'], delegates: [{ app: APP, login: 'someone' }] }), []);
+  const dir = mkdtempSync(join(tmpdir(), 'app-idempotent-'));
+  try {
+    const file = join(dir, 'pipeline.config.json');
+    const template = JSON.parse(readFileSync(new URL('../template/pipeline.config.json', import.meta.url), 'utf8'));
+    writeFileSync(file, JSON.stringify({ ...template, ...both }));
+    const auth = authority(loadConfig(file, { warn: () => {} }));
+    assert.equal(auth.delegates.length, 3);
+    assert.ok(auth.adminOnlyPaths.includes('.pipeline/**'));
+    assert.equal(grantCovers(loadConfig(file, { warn: () => {} }), BOT, ['approve'], null, APP.id), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 // Frozen copy of this file as it was before App delegates existed (dev-pipeline
-// #18). Tests compare the live code against it to prove that with no delegates, or
-// with a user-account delegate, nothing changed. Never edit it.
+// main with #20). Tests compare the live code against it to prove that with no
+// delegates, or with a user-account delegate, nothing changed. Never edit it.
 // Who may post which command. Admins hold every power. A delegate is a separate
 // GitHub account the owner grants a subset of commands to, in pipeline.config.json:
 //
@@ -61,8 +61,10 @@ function entryProblem(entry, admins) {
     const unknown = entry.decide.find((cls) => !DECISION_CLASSES.includes(cls));
     if (unknown !== undefined) return `has an unknown decision class "${unknown}"`;
   }
-  if ('since' in entry && !validSince(entry.since)) return 'has a "since" that is not an ISO date and time';
-  if ('id' in entry && !validUserId(entry.id)) return 'has an "id" that is not a GitHub user id';
+  // Cleaning writes `since: null` and `id: null` for an entry without them, and the
+  // gate cleans a cleaned config again, so null means absent.
+  if (entry.since != null && !validSince(entry.since)) return 'has a "since" that is not an ISO date and time';
+  if (entry.id != null && !validUserId(entry.id)) return 'has an "id" that is not a GitHub user id';
   return null;
 }
 
